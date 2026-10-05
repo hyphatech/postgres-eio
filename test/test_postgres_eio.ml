@@ -987,9 +987,15 @@ let a_severity_by_its_unlocalised_name () =
     (fun (fields, expected) ->
       Alcotest.(check string) expected expected (severity fields))
     [
-      ([ ('S', "AVERTISSEMENT"); ('V', "WARNING") ], "warning");
+      ([ ('V', "ERROR") ], "error");
       ([ ('V', "FATAL") ], "fatal");
+      ([ ('V', "PANIC") ], "panic");
+      ([ ('V', "WARNING") ], "warning");
+      ([ ('V', "NOTICE") ], "notice");
+      ([ ('V', "DEBUG") ], "debug");
+      ([ ('V', "INFO") ], "info");
       ([ ('V', "LOG") ], "log");
+      ([ ('S', "AVERTISSEMENT"); ('V', "WARNING") ], "warning");
       ([ ('S', "AVERTISSEMENT") ], "other AVERTISSEMENT");
       ([], "error");
     ]
@@ -3195,7 +3201,7 @@ let a_notice_is_logged () =
     "at info, on postgres-eio" true
     (List.exists
        (fun l ->
-         contains l "postgres-eio" && contains l "hello from the server")
+         contains l "postgres-eio info" && contains l "hello from the server")
        lines)
 
 (* At debug, no log line has the password, a parameter or the SASL
