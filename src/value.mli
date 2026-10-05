@@ -10,8 +10,8 @@
     10000 may print, in a distant time zone, as a year no decoder reads.
 
     A type with no reader here -- [numeric], [time], a range, [inet] -- is
-    always sent as text, since {!binary} asks for no other, and {!text} hands
-    it over as the server printed it. *)
+    always sent as text, since {!binary} asks for no other, and {!text} hands it
+    over as the server printed it. *)
 
 val binary : int -> bool
 (** Whether this module decodes the type's binary form: [bool], [bytea], [int8],
