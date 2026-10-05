@@ -15,8 +15,22 @@ val field : t -> char -> string option
 val sqlstate : t -> string
 (** The five-character SQLSTATE, e.g. ["23505"] (unique violation). *)
 
-val severity : t -> string
-(** [ERROR], [FATAL] or [PANIC]; unlocalised where the server sends it so. *)
+(** How serious: the first three end a statement or a session, the rest come as
+    notices (protocol 54.8). *)
+type severity =
+  | Error
+  | Fatal  (** the session ends *)
+  | Panic  (** every session ends *)
+  | Warning
+  | Notice
+  | Debug
+  | Info
+  | Log
+  | Other of string
+      (** a severity this module does not know, in the server's language when it
+          sends no unlocalised one (before Postgres 9.6) *)
+
+val severity : t -> severity
 
 val message : t -> string
 (** The primary message, in the server's [lc_messages]. *)

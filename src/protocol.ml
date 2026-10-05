@@ -186,15 +186,15 @@ type authentication =
 
 type field = {
   name : string;
-  table : int;
+  table : Oid.t;
   column : int;
-  type_oid : int;
+  type_oid : Oid.t;
   type_size : int;
   type_modifier : int;
-  format : int;
+  format : format;
 }
 
-type copy = { binary : bool; columns : int list }
+type copy = { format : format; columns : format list }
 
 type backend =
   | Authentication of authentication
@@ -213,7 +213,7 @@ type backend =
   | Close_complete
   | No_data
   | Portal_suspended
-  | Parameter_description of int list
+  | Parameter_description of Oid.t list
   | Copy_in_response of copy
   | Copy_out_response of copy
   | Copy_both_response of copy
@@ -263,6 +263,19 @@ let int32 c =
   c.at <- c.at + 4;
   v
 
+(* An OID is unsigned: past 2^31 it would read as negative. *)
+let oid c =
+  let n = int32 c land 0xFFFF_FFFF in
+  match Oid.of_int n with
+  | Some oid -> oid
+  | None -> refuse c (Printf.sprintf "has an OID %d past four bytes" n)
+
+let format_of c what =
+  match sint16 c with
+  | 0 -> Text
+  | 1 -> Binary
+  | n -> refuse c (Printf.sprintf "gives %s the format %d, not 0 or 1" what n)
+
 let bytes c n =
   need c n "ends inside a value";
   let v = String.sub c.body c.at n in
@@ -298,14 +311,14 @@ let count c n what =
   if n < 0 then refuse c (Printf.sprintf "says %d %s" n what) else n
 
 let copy c =
-  let binary =
+  let format =
     match int8 c with
-    | 0 -> false
-    | 1 -> true
+    | 0 -> Text
+    | 1 -> Binary
     | n -> refuse c (Printf.sprintf "has an overall format %d, not 0 or 1" n)
   in
   let n = int16 c in
-  { binary; columns = List.init n (fun _ -> int16 c) }
+  { format; columns = List.init n (fun _ -> format_of c "a column") }
 
 let authentication c =
   match int32 c with
@@ -348,12 +361,12 @@ let message tag c =
       Row_description
         (List.init n (fun _ ->
              let name = cstring c in
-             let table = int32 c in
+             let table = oid c in
              let column = sint16 c in
-             let type_oid = int32 c in
+             let type_oid = oid c in
              let type_size = sint16 c in
              let type_modifier = int32 c in
-             let format = sint16 c in
+             let format = format_of c (Printf.sprintf "%S" name) in
              { name; table; column; type_oid; type_size; type_modifier; format }))
   | 'D' ->
       let n = int16 c in
@@ -379,7 +392,7 @@ let message tag c =
   | 's' -> Portal_suspended
   | 't' ->
       let n = int16 c in
-      Parameter_description (List.init n (fun _ -> int32 c))
+      Parameter_description (List.init n (fun _ -> oid c))
   | 'G' -> Copy_in_response (copy c)
   | 'H' -> Copy_out_response (copy c)
   | 'W' -> Copy_both_response (copy c)

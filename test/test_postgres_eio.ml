@@ -57,9 +57,14 @@ let show_fields fs =
 
 let show_cell = function None -> "NULL" | Some v -> Printf.sprintf "%S" v
 
+(* Formats as their wire codes, so expectations read as the bytes do. *)
+let format_code = function P.Text -> 0 | P.Binary -> 1
+
 let show_copy (c : P.copy) =
-  Printf.sprintf "%b [%s]" c.binary
-    (String.concat "," (List.map string_of_int c.columns))
+  Printf.sprintf "%b [%s]"
+    (format_code c.format = 1)
+    (String.concat ","
+       (List.map (fun f -> string_of_int (format_code f)) c.columns))
 
 let show = function
   | P.Authentication a -> "auth " ^ show_auth a
@@ -72,8 +77,11 @@ let show = function
       ^ String.concat ","
           (List.map
              (fun (f : P.field) ->
-               Printf.sprintf "%s/%d/%d/%d/%d/%d/%d" f.name f.table f.column
-                 f.type_oid f.type_size f.type_modifier f.format)
+               Printf.sprintf "%s/%d/%d/%d/%d/%d/%d" f.name
+                 (Postgres_eio.Oid.to_int f.table)
+                 f.column
+                 (Postgres_eio.Oid.to_int f.type_oid)
+                 f.type_size f.type_modifier (format_code f.format))
              fs)
   | P.Data_row cells ->
       "row " ^ String.concat "," (Array.to_list (Array.map show_cell cells))
@@ -89,7 +97,9 @@ let show = function
   | P.No_data -> "no-data"
   | P.Portal_suspended -> "suspended"
   | P.Parameter_description oids ->
-      "parameters " ^ String.concat "," (List.map string_of_int oids)
+      "parameters "
+      ^ String.concat ","
+          (List.map (fun o -> string_of_int (Postgres_eio.Oid.to_int o)) oids)
   | P.Copy_in_response c -> "copy-in " ^ show_copy c
   | P.Copy_out_response c -> "copy-out " ^ show_copy c
   | P.Copy_both_response c -> "copy-both " ^ show_copy c
@@ -142,6 +152,11 @@ let messages =
        ^ int32 (-1) ^ int16 0 ^ cstr "note" ^ int32 0 ^ int16 0 ^ int32 25
        ^ int16 0xffff ^ int32 (-1) ^ int16 0),
       "row-description id/16384/1/23/4/-1/0,note/0/0/25/-1/-1/0" );
+    ( "RowDescription, OIDs past 2^31 read unsigned",
+      msg 'T'
+        (int16 1 ^ cstr "big" ^ int32 (-16) ^ int16 1 ^ int32 (-1) ^ int16 4
+       ^ int32 (-1) ^ int16 1),
+      "row-description big/4294967280/1/4294967295/4/-1/1" );
     ( "DataRow",
       msg 'D' (int16 3 ^ int32 2 ^ "42" ^ int32 (-1) ^ int32 0),
       "row \"42\",NULL,\"\"" );
@@ -285,6 +300,14 @@ let refusals =
       "no section defines";
     refused "54.7 a transaction status that is not I, T or E" (msg 'Z' "X")
       "transaction status";
+    refused "54.7 a column's format that is not 0 or 1"
+      (msg 'T'
+         (int16 1 ^ cstr "c" ^ int32 0 ^ int16 0 ^ int32 23 ^ int16 4
+        ^ int32 (-1) ^ int16 2))
+      "the format 2";
+    refused "54.7 a COPY column's format that is not 0 or 1"
+      (msg 'G' ("\000" ^ int16 1 ^ int16 2))
+      "the format 2";
     refused "54.7 a column whose length is negative, not -1"
       (msg 'D' (int16 1 ^ int32 (-2)))
       "length -2";
@@ -926,12 +949,57 @@ let an_int_reads_back =
     QCheck2.Gen.int (fun n ->
       Option.equal Int.equal (Text.to_int (Text.int n)) (Some n))
 
+let oid n =
+  match Postgres_eio.Oid.of_int n with
+  | Some oid -> oid
+  | None -> Alcotest.failf "%d is no OID" n
+
+let an_oid_is_four_unsigned_bytes () =
+  List.iter
+    (fun (n, expected) ->
+      Alcotest.(check (option int))
+        (string_of_int n) expected
+        (Option.map Postgres_eio.Oid.to_int (Postgres_eio.Oid.of_int n)))
+    [
+      (-1, None);
+      (0, Some 0);
+      (23, Some 23);
+      (4294967295, Some 4294967295);
+      (4294967296, None);
+    ]
+
+(* V is never localised, so it decides; S stands in only without it. *)
+let a_severity_by_its_unlocalised_name () =
+  let module E = Postgres_eio.Server_error in
+  let severity fields =
+    match E.severity (E.of_fields fields) with
+    | E.Error -> "error"
+    | E.Fatal -> "fatal"
+    | E.Panic -> "panic"
+    | E.Warning -> "warning"
+    | E.Notice -> "notice"
+    | E.Debug -> "debug"
+    | E.Info -> "info"
+    | E.Log -> "log"
+    | E.Other s -> "other " ^ s
+  in
+  List.iter
+    (fun (fields, expected) ->
+      Alcotest.(check string) expected expected (severity fields))
+    [
+      ([ ('S', "AVERTISSEMENT"); ('V', "WARNING") ], "warning");
+      ([ ('V', "FATAL") ], "fatal");
+      ([ ('V', "LOG") ], "log");
+      ([ ('S', "AVERTISSEMENT") ], "other AVERTISSEMENT");
+      ([], "error");
+    ]
+
 (* bytea's hex form, read back as a text cell is. *)
 let bytes_read_back =
   QCheck2.Test.make ~count:1000 ~name:"bytes written read back as themselves"
     QCheck2.Gen.string (fun s ->
       let bytea =
-        { Postgres_eio.Column.name = "b"; type_oid = 17; format = Text }
+        { Postgres_eio.Column.name = "b"; type_oid = oid 17; format = Text }
       in
       Option.equal String.equal
         (Postgres_eio.Value.bytes bytea (Text.bytes s))
@@ -1236,17 +1304,21 @@ let a_statement_is_described_without_running () =
   script t "create temp table d (x int4)";
   (match Pg.describe t "select $1::int4 + 1 as n, 'a'::text as t" with
   | Ok d ->
-      Alcotest.(check (list int)) "a parameter's type" [ 23 ] d.parameters;
+      Alcotest.(check (list int))
+        "a parameter's type" [ 23 ]
+        (List.map Postgres_eio.Oid.to_int d.parameters);
       Alcotest.(check (list (pair string int)))
         "each column, named and typed"
         [ ("n", 23); ("t", 25) ]
         (List.map
-           (fun (c : Pg.Column.t) -> (c.name, c.type_oid))
+           (fun (c : Pg.Column.t) -> (c.name, Pg.Oid.to_int c.type_oid))
            (Array.to_list d.columns))
   | Error e -> Alcotest.failf "not described: %s" (Pg.error_to_string e));
   (match Pg.describe t "insert into d values ($1)" with
   | Ok d ->
-      Alcotest.(check (list int)) "an insert's parameter" [ 23 ] d.parameters;
+      Alcotest.(check (list int))
+        "an insert's parameter" [ 23 ]
+        (List.map Postgres_eio.Oid.to_int d.parameters);
       Alcotest.(check int) "and no columns" 0 (Array.length d.columns)
   | Error e -> Alcotest.failf "not described: %s" (Pg.error_to_string e));
   Alcotest.(check string)
@@ -1415,9 +1487,11 @@ let a_server_error_keeps_the_connection () =
       Alcotest.(check string)
         "its SQLSTATE" "22012"
         (Pg.Server_error.sqlstate e);
-      Alcotest.(check string)
-        "its severity" "ERROR"
-        (Pg.Server_error.severity e);
+      Alcotest.(check bool)
+        "its severity" true
+        (match Pg.Server_error.severity e with
+        | Pg.Server_error.Error -> true
+        | _ -> false);
       Alcotest.(check bool)
         "every field kept" true
         (Option.is_some (Pg.Server_error.field e 'R'))
@@ -2491,7 +2565,7 @@ let the_columns_before_any_row () =
           Array.to_list
             (Array.map
                (fun (c : Pg.Column.t) ->
-                 Printf.sprintf "%s/%d/%s" c.name c.type_oid
+                 Printf.sprintf "%s/%d/%s" c.name (Pg.Oid.to_int c.type_oid)
                    (match c.format with Text -> "text" | Binary -> "binary"))
                cs)
           :: !seen
@@ -2897,7 +2971,7 @@ let decoded (c : Pg.Column.t) cell =
   | None -> "NULL"
   | Some s -> (
       let text = show Fun.id (Value.text c s) in
-      match c.type_oid with
+      match Pg.Oid.to_int c.type_oid with
       | 16 -> show string_of_bool (Value.bool c s)
       | 20 | 21 | 23 | 26 ->
           show string_of_int (Value.int c s)
@@ -3988,6 +4062,10 @@ let () =
             QCheck_alcotest.to_alcotest an_int_reads_back;
             QCheck_alcotest.to_alcotest bytes_read_back;
             QCheck_alcotest.to_alcotest a_date_reads_back;
+            Alcotest.test_case "an OID is four unsigned bytes" `Quick
+              an_oid_is_four_unsigned_bytes;
+            Alcotest.test_case "a severity, by its unlocalised name" `Quick
+              a_severity_by_its_unlocalised_name;
           ] );
       ( "the connection",
         match target with

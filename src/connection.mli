@@ -95,7 +95,7 @@ val script : t -> string -> (unit, error) result
     COPY functions instead. *)
 
 type description = {
-  parameters : int list;  (** inferred parameter type OIDs, [0] where unknown *)
+  parameters : Oid.t list;  (** inferred parameter types, [0] where unknown *)
   columns : Column.t array;  (** empty for a statement returning no rows *)
 }
 

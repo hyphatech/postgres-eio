@@ -193,9 +193,13 @@ let rec next ~awaited t link =
 let notice fields =
   let e = Server_error.of_fields fields in
   match Server_error.severity e with
-  | "WARNING" -> Log.warn (fun m -> m "%s" (Server_error.to_string e))
-  | "NOTICE" | "INFO" -> Log.info (fun m -> m "%s" (Server_error.to_string e))
-  | _ -> Log.debug (fun m -> m "%s" (Server_error.to_string e))
+  | Server_error.Warning ->
+      Log.warn (fun m -> m "%s" (Server_error.to_string e))
+  | Server_error.Notice | Server_error.Info ->
+      Log.info (fun m -> m "%s" (Server_error.to_string e))
+  | Server_error.Error | Server_error.Fatal | Server_error.Panic
+  | Server_error.Debug | Server_error.Log | Server_error.Other _ ->
+      Log.debug (fun m -> m "%s" (Server_error.to_string e))
 
 let asynchronous t = function
   | P.Notice_response fields ->
@@ -1103,19 +1107,7 @@ let refuse_copy_in t link ~extended =
   end
 
 let column_of (f : P.field) =
-  let format =
-    match f.format with
-    | 0 -> Column.Text
-    | 1 -> Column.Binary
-    | n ->
-        fail
-          (Protocol
-             (Printf.sprintf
-                "54.7 Message Formats: a RowDescription gives %S the format \
-                 %d, not 0 or 1"
-                f.name n))
-  in
-  { Column.name = f.name; type_oid = f.type_oid; format }
+  { Column.name = f.name; type_oid = f.type_oid; format = f.format }
 
 let columns_of fields = Array.of_list (List.map column_of fields)
 
@@ -1525,7 +1517,7 @@ let script t sql =
       drive ~through:reply t link;
       !answer)
 
-type description = { parameters : int list; columns : Column.t array }
+type description = { parameters : Oid.t list; columns : Column.t array }
 
 (* Uses the unnamed statement, so the cache is untouched. *)
 let read_description t link =

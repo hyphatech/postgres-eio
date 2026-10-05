@@ -13,7 +13,7 @@
     always sent as text, since {!binary} asks for no other, and {!text} hands it
     over as the server printed it. *)
 
-val binary : int -> bool
+val binary : Oid.t -> bool
 (** Whether this module decodes the type's binary form: [bool], [bytea], [int8],
     [int2], [int4], [text], [oid], [json], [float4], [float8], [varchar],
     [date], [timestamp], [timestamptz], [interval], [uuid] and [jsonb]. *)

@@ -10,7 +10,8 @@
 
     The lower layers do no IO and can be used alone: {!module-Protocol}
     (messages and bytes), {!Auth} (sign-in exchanges), {!Conninfo} (connection
-    strings), {!Text}, {!Value} and {!Interval} (cell values). *)
+    strings), {!Text}, {!Value}, {!Interval} and {!Oid} (cell values and their
+    types). *)
 
 module Protocol = Protocol
 module Auth = Auth
@@ -19,6 +20,7 @@ module Server_error = Server_error
 module Tag = Tag
 module Interval = Interval
 module Text = Text
+module Oid = Oid
 module Column = Column
 module Value = Value
 

@@ -71,16 +71,16 @@ type authentication =
 
 type field = {
   name : string;
-  table : int;
-  column : int;
-  type_oid : int;
+  table : Oid.t;  (** the table's, or [0] for an expression *)
+  column : int;  (** the column's number in its table, or [0] *)
+  type_oid : Oid.t;
   type_size : int;
   type_modifier : int;
-  format : int;
+  format : format;
 }
 (** One column of a RowDescription. *)
 
-type copy = { binary : bool; columns : int list }
+type copy = { format : format; columns : format list }
 (** A Copy*Response: the overall format and each column's. *)
 
 type backend =
@@ -102,7 +102,7 @@ type backend =
   | Close_complete
   | No_data
   | Portal_suspended
-  | Parameter_description of int list
+  | Parameter_description of Oid.t list
   | Copy_in_response of copy
   | Copy_out_response of copy
   | Copy_both_response of copy

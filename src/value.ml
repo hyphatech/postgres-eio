@@ -22,7 +22,8 @@ let uuid_oid = 2950
 let jsonb_oid = 3802
 
 let binary oid =
-  List.exists (Int.equal oid)
+  List.exists
+    (Int.equal (Oid.to_int oid))
     [
       bool_oid;
       bytea_oid;
@@ -43,7 +44,7 @@ let binary oid =
       jsonb_oid;
     ]
 
-let is (c : Column.t) oid = Int.equal c.type_oid oid
+let is (c : Column.t) oid = Int.equal (Oid.to_int c.type_oid) oid
 
 (* Postgres's epoch, 2000-01-01, relative to Unix's; and years 1 to 9999,
    the range the text forms read, in days. *)

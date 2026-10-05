@@ -6,6 +6,6 @@ type format = Protocol.format =
 
 type t = {
   name : string;  (** as the select names it, [?column?] when it does not *)
-  type_oid : int;  (** the type, by its row in [pg_type]: [23] is [int4] *)
+  type_oid : Oid.t;  (** the type, by its row in [pg_type]: [23] is [int4] *)
   format : format;
 }
