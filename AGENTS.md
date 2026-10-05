@@ -154,4 +154,6 @@ the wording of an error or a log line.
 
 The version lives only in the git tag (`0.1.0`, no `v`). A release renames
 `## Unreleased` in CHANGES.md to the version and date, tags it, and submits
-the package to opam-repository.
+the package to opam-repository from the `hyphatech` fork. The GitHub
+release notes are that entry with each paragraph and bullet on one line,
+since GitHub keeps every line break in release notes.
