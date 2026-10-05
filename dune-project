@@ -1,6 +1,5 @@
-(lang dune 3.16)
+(lang dune 3.18)
 (name postgres-eio)
-
 
 (generate_opam_files true)
 
@@ -9,6 +8,8 @@
 (authors "Hypha Technologies Ltd")
 
 (license MIT)
+
+(maintenance_intent "(latest)")
 
 (source
  (github hyphatech/postgres-eio))

@@ -131,9 +131,27 @@ A change is done when every box holds:
 
 ## Changes
 
+- A user-visible change adds a line under `## Unreleased` in
+  [CHANGES.md](CHANGES.md), in the same commit. A breaking one says so.
 - A change that makes a sentence in a document false edits that sentence in
   the same commit.
 - A user-visible change updates the `.mli` it touches; a new supported
   feature or a removed limitation updates the README.
 - Commit subjects are imperative, under 72 characters, with no full stop.
   The body says why, wrapped at 72. No trailers.
+
+## Releases
+
+[Semantic Versioning 2.0.0](https://semver.org). Before 1.0, a breaking
+change bumps the minor version and anything else the patch.
+
+Breaking means a user's code may stop compiling or behave differently:
+removing or renaming anything in an `.mli`, changing a type, adding a
+constructor to a public variant (it breaks exhaustive matches), adding a
+required argument, or changing a default or documented behaviour. Adding a
+function, a module or an optional argument is not breaking, and neither is
+the wording of an error or a log line.
+
+The version lives only in the git tag (`0.1.0`, no `v`). A release renames
+`## Unreleased` in CHANGES.md to the version and date, tags it, and submits
+the package to opam-repository.
