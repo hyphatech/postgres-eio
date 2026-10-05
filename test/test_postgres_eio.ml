@@ -921,6 +921,36 @@ let a_float_reads_back =
     QCheck2.Gen.float (fun f ->
       Option.equal Float.equal (Text.to_float (Text.float f)) (Some f))
 
+let an_int_reads_back =
+  QCheck2.Test.make ~count:1000 ~name:"an int written reads back as itself"
+    QCheck2.Gen.int (fun n ->
+      Option.equal Int.equal (Text.to_int (Text.int n)) (Some n))
+
+(* bytea's hex form, read back as a text cell is. *)
+let bytes_read_back =
+  QCheck2.Test.make ~count:1000 ~name:"bytes written read back as themselves"
+    QCheck2.Gen.string (fun s ->
+      let bytea =
+        { Postgres_eio.Column.name = "b"; type_oid = 17; format = Text }
+      in
+      Option.equal String.equal
+        (Postgres_eio.Value.bytes bytea (Text.bytes s))
+        (Some s))
+
+(* Every day of years 1 to 9999, the years both forms read. *)
+let a_date_reads_back =
+  QCheck2.Test.make ~count:1000 ~name:"a date written reads back as itself"
+    QCheck2.Gen.(int_range (-719_162) 2_932_896)
+    (fun days ->
+      match Option.bind (Ptime.Span.of_d_ps (days, 0L)) Ptime.of_span with
+      | None -> QCheck2.Test.fail_reportf "day %d is no instant" days
+      | Some instant ->
+          let date = Ptime.to_date instant in
+          Option.equal
+            (fun (y, m, d) (y', m', d') -> y = y' && m = m' && d = d')
+            (Text.to_date (Text.date date))
+            (Some date))
+
 (* Against a real server, named by POSTGRES_EIO_TEST_PG (see compose.yaml).
    Skipped when unset. *)
 
@@ -3228,6 +3258,47 @@ let a_date_and_a_timestamp_bound () =
        [ Some (Text.timestamp (instant_of_us (ten + 123_456))) ]);
   Pg.close t
 
+(* Bytes written in hex are the bytes the server holds, read back in
+   binary, in hex, and in the escape form an older client may ask for; and a
+   bool as the server reads it and writes it. *)
+let bytes_bound () =
+  with_eio @@ fun env sw ->
+  let t = connect_cached env sw (plain ()) in
+  let back ~binary s =
+    let columns = ref [||] in
+    match
+      ok_pg
+        (Pg.query t "select $1::bytea" ~binary
+           ~params:[ Some (Text.bytes s) ]
+           ~columns:(fun cs -> columns := cs)
+           ~init:[]
+           ~row:(fun acc cells -> cells :: acc))
+    with
+    | [ [| Some cell |] ], _ -> Value.bytes !columns.(0) cell
+    | _ -> None
+  in
+  let each_byte = String.init 256 Char.chr in
+  let check output ~binary =
+    script t (Printf.sprintf "set bytea_output = '%s'" output);
+    List.iter
+      (fun s ->
+        Alcotest.(check (option string))
+          (Printf.sprintf "%s, binary %b, %d bytes" output binary
+             (String.length s))
+          (Some s) (back ~binary s))
+      [ ""; "\000"; "\\x"; each_byte ]
+  in
+  check "hex" ~binary:false;
+  check "hex" ~binary:true;
+  check "escape" ~binary:false;
+  List.iter
+    (fun b ->
+      Alcotest.(check (option bool))
+        "a bool" (Some b)
+        (Text.to_bool (one t "select $1::bool" [ Some (Text.bool b) ])))
+    [ true; false ];
+  Pg.close t
+
 (* A host name invalid for TLS (an underscore, as in compose service
    names) works below verify-full and is refused at verify-full. Reached
    via [hostaddr], since nothing resolves it. *)
@@ -3359,6 +3430,7 @@ let connection_cases =
     Alcotest.test_case "a date and a timestamp, bound" `Quick
       a_date_and_a_timestamp_bound;
     Alcotest.test_case "an interval and an int8, bound" `Quick an_interval_bound;
+    Alcotest.test_case "bytes and a bool, bound" `Quick bytes_bound;
     Alcotest.test_case "54.2.10 a name TLS cannot carry" `Quick
       a_name_tls_cannot_carry;
     Alcotest.test_case "54.3.1 a sign-in bound to TLS" `Quick
@@ -3903,6 +3975,9 @@ let () =
         @ [
             QCheck_alcotest.to_alcotest a_float_reads_back;
             QCheck_alcotest.to_alcotest an_int64_reads_back;
+            QCheck_alcotest.to_alcotest an_int_reads_back;
+            QCheck_alcotest.to_alcotest bytes_read_back;
+            QCheck_alcotest.to_alcotest a_date_reads_back;
           ] );
       ( "the connection",
         match target with
