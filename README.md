@@ -162,11 +162,11 @@ native OCaml driver on Async, and libpq, the C library, through the
 
 | | postgres-eio | postgres_async | libpq |
 |---|--:|--:|--:|
-| Round trip, `select $1::int` | 316 µs | 591 µs | 283 µs |
-| Insert, one round trip each | 323 µs | 603 µs | 296 µs |
-| Insert, 1,000 pipelined in one round trip | 3.2 µs | n/a | n/a |
-| Read a 100,000-row result, per row | 157 ns | 168 ns | 186 ns |
-| Client CPU per round trip | 30 µs | 44 µs | 15 µs |
+| Round trip, `select $1::int` | 329 µs | 582 µs | 287 µs |
+| Insert, one round trip each | 337 µs | 594 µs | 296 µs |
+| Insert, 1,000 pipelined in one round trip | 5.0 µs | n/a | n/a |
+| Read a 100,000-row result, per row | 138 ns | 142 ns | 169 ns |
+| Client CPU per round trip | 41 µs | 51 µs | 21 µs |
 
 postgres-eio 0.1.0, postgres_async 0.17.0, postgresql 5.4.0. Apple M4 Pro,
 Postgres 18.6 in Docker, one connection per driver, text results, median of
