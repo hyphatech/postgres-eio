@@ -150,16 +150,16 @@ heartbeat, reconnects with backoff and listens again, and returns
 
 ## Performance
 
-Median time per operation, lower is better, against the two other ways
-OCaml reaches Postgres: libpq through the `postgresql` bindings, and
-`postgres_async`.
+Median time per operation, lower is better, beside `postgres_async`, a
+native OCaml driver on Async, and libpq, the C library, through the
+`postgresql` bindings.
 
-| | postgres-eio | libpq | postgres_async |
+| | postgres-eio | postgres_async | libpq |
 |---|--:|--:|--:|
-| Round trip, `select $1::int` | 316 µs | 283 µs | 591 µs |
-| Insert, one round trip each | 323 µs | 296 µs | 603 µs |
+| Round trip, `select $1::int` | 316 µs | 591 µs | 283 µs |
+| Insert, one round trip each | 323 µs | 603 µs | 296 µs |
 | Insert, 1,000 pipelined in one round trip | 3.2 µs | n/a | n/a |
-| Read a 100,000-row result, per row | 157 ns | 186 ns | 168 ns |
+| Read a 100,000-row result, per row | 157 ns | 168 ns | 186 ns |
 
 Apple M4 Pro, Postgres 18.6 in Docker, one connection per driver, text
 results, median of three 5 s runs, October 2026. On macOS most of a round
