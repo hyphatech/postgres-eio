@@ -34,6 +34,8 @@
    (>= 1.0.3))
   (ptime
    (>= 1.2.0))
+  (uuidm
+   (>= 0.9.10))
   (mirage-crypto-rng
    (>= 2.4.1))
   (domain-name

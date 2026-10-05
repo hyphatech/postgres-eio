@@ -149,18 +149,10 @@ let bytes (c : Column.t) s =
 
 let uuid (c : Column.t) s =
   match c.format with
-  | Column.Text ->
-      if String.length s = 36 then Some (String.lowercase_ascii s) else None
+  | Column.Text -> Uuidm.of_string s
   | Column.Binary ->
-      if not (is c uuid_oid && String.length s = 16) then None
-      else
-        let hex i j =
-          String.concat ""
-            (List.init (j - i) (fun k ->
-                 Printf.sprintf "%02x" (Char.code s.[i + k])))
-        in
-        Some
-          (String.concat "-" [ hex 0 4; hex 4 6; hex 6 8; hex 8 10; hex 10 16 ])
+      if is c uuid_oid && String.length s = 16 then Uuidm.of_binary_string s
+      else None
 
 let date (c : Column.t) s =
   match c.format with
@@ -169,7 +161,9 @@ let date (c : Column.t) s =
       if not (is c date_oid && String.length s = 4) then None
       else
         let days = Int32.to_int (String.get_int32_be s 0) + epoch_days in
-        if days >= first_day && days < past_last_day then Some days else None
+        if days >= first_day && days < past_last_day then
+          Instant.date_of_days days
+        else None
 
 (* [infinity] and [-infinity] are the int64 extremes; values outside years
    1 to 9999 are refused, as in text. *)
@@ -181,7 +175,7 @@ let microseconds (c : Column.t) oid s =
     else
       let us = Int64.to_int v + epoch_us in
       if us >= first_day * us_per_day && us < past_last_day * us_per_day then
-        Some us
+        Instant.of_us us
       else None
 
 let timestamp (c : Column.t) s =
@@ -209,7 +203,7 @@ let text (c : Column.t) s =
   | Column.Binary ->
       if is c text_oid || is c varchar_oid || is c json_oid then Some s
       else if is c jsonb_oid then json c s
-      else if is c uuid_oid then uuid c s
+      else if is c uuid_oid then Option.map Uuidm.to_string (uuid c s)
       else if is c bool_oid then
         Option.map (fun b -> if b then "t" else "f") (bool c s)
       else if is c int8_oid && String.length s = 8 then

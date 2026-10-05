@@ -3,6 +3,8 @@
  (modules test_postgres_eio)
  (libraries
   postgres-eio
+  ptime
+  uuidm
   cstruct
   eio
   eio_main

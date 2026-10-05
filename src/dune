@@ -11,6 +11,7 @@
   ca-certs
   ptime
   ptime.clock
+  uuidm
   mirage-crypto-rng
   mirage-crypto-rng.unix
   domain-name

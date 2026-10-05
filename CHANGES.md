@@ -11,6 +11,8 @@ First release.
 - libpq's connection strings, both forms, with the `PG*` variables and
   `.pgpass` on request.
 - Statement caching, pipelining, `execute_many`, text and binary results.
+- Cells read as OCaml values, text or binary alike: dates and instants as
+  `Ptime` values, uuids as `Uuidm.t`.
 - COPY in and out, streamed.
 - LISTEN/NOTIFY with heartbeats and reconnection.
 - A connection pool that resets every connection it lends.

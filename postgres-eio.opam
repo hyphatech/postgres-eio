@@ -17,6 +17,7 @@ depends: [
   "x509" {>= "1.1.1"}
   "ca-certs" {>= "1.0.3"}
   "ptime" {>= "1.2.0"}
+  "uuidm" {>= "0.9.10"}
   "mirage-crypto-rng" {>= "2.4.1"}
   "domain-name" {>= "0.5.0"}
   "ipaddr" {>= "5.6.2"}

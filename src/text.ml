@@ -54,15 +54,21 @@ let civil_from_days z =
 let floor_div a b = if a >= 0 then a / b else ((a + 1) / b) - 1
 let us_per_day = 86_400_000_000
 
-(* ISO 8601 in UTC, read whatever the server's DateStyle. *)
-let timestamptz us =
+(* ISO 8601, read whatever the server's DateStyle: [zone] is [Z] for an
+   instant and empty for a reading on no clock. *)
+let iso ~zone t =
+  let us = Instant.to_us t in
   let day = floor_div us us_per_day in
   let rest = us - (day * us_per_day) in
   let y, m, d = civil_from_days day in
   let s = rest / 1_000_000 in
-  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d.%06dZ" y m d (s / 3600)
+  Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d.%06d%s" y m d (s / 3600)
     (s / 60 mod 60)
-    (s mod 60) (rest mod 1_000_000)
+    (s mod 60) (rest mod 1_000_000) zone
+
+let timestamptz t = iso ~zone:"Z" t
+let timestamp t = iso ~zone:"" t
+let date (y, m, d) = Printf.sprintf "%04d-%02d-%02d" y m d
 
 let digits s i n =
   if i + n > String.length s then None
@@ -85,7 +91,7 @@ let to_date s =
     let* y = digits s 0 4 in
     let* m = if at 4 '-' then digits s 5 2 else None in
     let* d = if at 7 '-' then digits s 8 2 else None in
-    Some (days_from_civil y m d)
+    Option.map Ptime.to_date (Ptime.of_date (y, m, d))
 
 (* [YYYY-MM-DD HH:MM:SS[.ffffff]+HH[:MM[:SS]]] in any time zone. BC dates,
    years past 9999 and infinity are refused. *)
@@ -98,6 +104,7 @@ let to_timestamptz s =
   let* h = if at 10 ' ' || at 10 'T' then digits s 11 2 else None in
   let* mi = if at 13 ':' then digits s 14 2 else None in
   let* sec = if at 16 ':' then digits s 17 2 else None in
+  let* _ = Ptime.of_date_time ((y, mo, d), ((h, mi, sec), 0)) in
   let i, frac =
     if at 19 '.' then
       let rec fend j =
@@ -130,4 +137,4 @@ let to_timestamptz s =
   let seconds =
     (days_from_civil y mo d * 86_400) + (h * 3600) + (mi * 60) + sec - offset_s
   in
-  Some ((seconds * 1_000_000) + frac)
+  Instant.of_us ((seconds * 1_000_000) + frac)

@@ -806,6 +806,27 @@ let a_url_reads_back =
 
 module Text = Postgres_eio.Text
 
+(* The cases write an instant as microseconds since the epoch, computed
+   independently of the driver; these move one between that figure and
+   Ptime, through whole seconds and their fraction. *)
+let us_of t =
+  match Ptime.Span.to_int_s (Ptime.to_span (Ptime.truncate ~frac_s:0 t)) with
+  | None -> Alcotest.fail "an instant past an int of seconds"
+  | Some s ->
+      let _, ps = Ptime.Span.to_d_ps (Ptime.frac_s t) in
+      (s * 1_000_000) + Int64.to_int (Int64.div ps 1_000_000L)
+
+let instant_of_us us =
+  let s = if us >= 0 then us / 1_000_000 else ((us + 1) / 1_000_000) - 1 in
+  let frac = Int64.mul (Int64.of_int (us - (s * 1_000_000))) 1_000_000L in
+  match
+    Option.bind
+      (Ptime.Span.of_d_ps (0, frac))
+      (fun f -> Ptime.of_span (Ptime.Span.add (Ptime.Span.of_int_s s) f))
+  with
+  | Some t -> t
+  | None -> Alcotest.failf "%d microseconds is no instant" us
+
 (* Postgres's timestamptz output and the instant, computed independently. *)
 let ten = 1_790_503_200_000_000 (* 2026-09-27 10:00:00 UTC *)
 
@@ -823,11 +844,33 @@ let instants =
     ("a BC date", "0044-03-15 12:00:00+00 BC", None);
     ("a year past 9999", "10000-01-01 00:00:00+00", None);
     ("infinity", "infinity", None);
+    ("not a date", "2026-02-30 10:00:00+00", None);
+    ("not a time", "2026-09-27 24:00:00+00", None);
   ]
 
 let reads_an_instant (name, text, expected) =
   Alcotest.test_case ("a timestamptz " ^ name) `Quick (fun () ->
-      Alcotest.(check (option int)) text expected (Text.to_timestamptz text))
+      Alcotest.(check (option int))
+        text expected
+        (Option.map us_of (Text.to_timestamptz text)))
+
+(* A date is read as the calendar says, and one the calendar has not is
+   refused. *)
+let dates =
+  [
+    ("2026-09-27", Some (2026, 9, 27));
+    ("0001-01-01", Some (1, 1, 1));
+    ("9999-12-31", Some (9999, 12, 31));
+    ("2024-02-29", Some (2024, 2, 29));
+    ("2026-02-29", None);
+    ("2026-13-01", None);
+    ("2026-9-27", None);
+  ]
+
+let reads_a_date (text, expected) =
+  Alcotest.test_case ("a date " ^ text) `Quick (fun () ->
+      Alcotest.(check (option (triple int int int)))
+        text expected (Text.to_date text))
 
 let a_float_reads_back =
   QCheck2.Test.make ~count:1000 ~name:"a float written reads back as itself"
@@ -2776,10 +2819,13 @@ let decoded (c : Pg.Column.t) cell =
       | 700 | 701 -> show (Printf.sprintf "%h") (Value.float c s)
       | 17 -> show hex (Value.bytes c s)
       | 25 | 1043 -> text
-      | 2950 -> show Fun.id (Value.uuid c s) ^ " " ^ text
-      | 1082 -> show string_of_int (Value.date c s)
-      | 1114 -> show string_of_int (Value.timestamp c s)
-      | 1184 -> show string_of_int (Value.timestamptz c s)
+      | 2950 -> show Uuidm.to_string (Value.uuid c s) ^ " " ^ text
+      | 1082 ->
+          show
+            (fun (y, m, d) -> Printf.sprintf "%04d-%02d-%02d" y m d)
+            (Value.date c s)
+      | 1114 -> show (fun t -> string_of_int (us_of t)) (Value.timestamp c s)
+      | 1184 -> show (fun t -> string_of_int (us_of t)) (Value.timestamptz c s)
       | 114 | 3802 -> show Fun.id (Value.json c s) ^ " " ^ text
       | oid -> Printf.sprintf "a type %d" oid)
 
@@ -2850,9 +2896,16 @@ let binary_values_are_the_values () =
   Alcotest.(check (option int))
     "an instant, in UTC"
     (Some (1_790_503_200_123_456 - 7_200_000_000))
-    (Value.timestamptz c s);
+    (Option.map us_of (Value.timestamptz c s));
   let c, s = one_binary "select '2026-09-27'::date" in
-  Alcotest.(check (option int)) "a date, in days" (Some 20723) (Value.date c s);
+  Alcotest.(check (option (triple int int int)))
+    "a date"
+    (Some (2026, 9, 27))
+    (Value.date c s);
+  let c, s = one_binary "select '0190C0FE-1234-7ABC-8DEF-0123456789AB'::uuid" in
+  Alcotest.(check (option string))
+    "a uuid" (Some "0190c0fe-1234-7abc-8def-0123456789ab")
+    (Option.map Uuidm.to_string (Value.uuid c s));
   let c, s = one_binary "select 0.1::float4" in
   Alcotest.(check (option (float 0.)))
     "a float4, as the single it is"
@@ -3019,14 +3072,40 @@ let an_instant_in_every_zone () =
       List.iter
         (fun us ->
           let printed =
-            one t "select $1::timestamptz" [ Some (Text.timestamptz us) ]
+            one t "select $1::timestamptz"
+              [ Some (Text.timestamptz (instant_of_us us)) ]
           in
           Alcotest.(check (option int))
             (zone ^ ": " ^ printed)
             (Some us)
-            (Text.to_timestamptz printed))
+            (Option.map us_of (Text.to_timestamptz printed)))
         [ ten + 123_456; -2_208_988_800_000_000; 0; -1 ])
     [ "UTC"; "Asia/Kolkata"; "America/New_York"; "Europe/Amsterdam" ];
+  Pg.close t
+
+(* A date and a timestamp written as text are read by the server as the same
+   date and the same reading, whatever the session's time zone. *)
+let a_date_and_a_timestamp_bound () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  script t "set timezone = 'Asia/Kolkata'";
+  Alcotest.(check string)
+    "a date" "2026-09-27"
+    (one t "select $1::date::text" [ Some (Text.date (2026, 9, 27)) ]);
+  Alcotest.(check string)
+    "a date the calendar has not, refused by the server" "refused"
+    (match
+       Pg.query t "select $1::date"
+         ~params:[ Some (Text.date (2026, 2, 30)) ]
+         ~init:()
+         ~row:(fun () _ -> ())
+     with
+    | Ok _ -> "read"
+    | Error _ -> "refused");
+  Alcotest.(check string)
+    "a timestamp" "2026-09-27 10:00:00.123456"
+    (one t "select $1::timestamp::text"
+       [ Some (Text.timestamp (instant_of_us (ten + 123_456))) ]);
   Pg.close t
 
 (* A host name invalid for TLS (an underscore, as in compose service
@@ -3157,6 +3236,8 @@ let connection_cases =
     Alcotest.test_case "no secret in the log" `Quick no_secret_in_the_log;
     Alcotest.test_case "an instant, in every time zone" `Quick
       an_instant_in_every_zone;
+    Alcotest.test_case "a date and a timestamp, bound" `Quick
+      a_date_and_a_timestamp_bound;
     Alcotest.test_case "54.2.10 a name TLS cannot carry" `Quick
       a_name_tls_cannot_carry;
     Alcotest.test_case "54.3.1 a sign-in bound to TLS" `Quick
@@ -3696,6 +3777,7 @@ let () =
         conninfo_cases @ [ QCheck_alcotest.to_alcotest a_url_reads_back ] );
       ( "text forms",
         List.map reads_an_instant instants
+        @ List.map reads_a_date dates
         @ [ QCheck_alcotest.to_alcotest a_float_reads_back ] );
       ( "the connection",
         match target with

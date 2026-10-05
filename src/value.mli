@@ -33,17 +33,15 @@ val float : Column.t -> string -> float option
 val bytes : Column.t -> string -> string option
 (** [bytea]'s bytes: in text, the hex form or the escape form. *)
 
-val uuid : Column.t -> string -> string option
-(** In its canonical text form, lowercase: [0190c0fe-...]. *)
+val uuid : Column.t -> string -> Uuidm.t option
+val date : Column.t -> string -> Ptime.date option
 
-val date : Column.t -> string -> int option
-(** Days since 1970-01-01. *)
+val timestamp : Column.t -> string -> Ptime.t option
+(** A [timestamp], which has no zone: the instant whose reading in UTC it is, to
+    the microsecond. *)
 
-val timestamp : Column.t -> string -> int option
-(** A [timestamp], which has no zone, as microseconds since 1970-01-01 00:00. *)
-
-val timestamptz : Column.t -> string -> int option
-(** Microseconds since the epoch, whatever the session's time zone. *)
+val timestamptz : Column.t -> string -> Ptime.t option
+(** The instant, to the microsecond, whatever the session's time zone. *)
 
 val json : Column.t -> string -> string option
 (** [json] and [jsonb]'s text; binary [jsonb] is a version byte before it. *)

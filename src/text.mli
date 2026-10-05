@@ -24,14 +24,23 @@ val to_bool : string -> bool option
 val bytes : string -> string
 (** [bytea] hex form ([\x...]). Decode with {!Value.bytes}. *)
 
-val timestamptz : int -> string
-(** Microseconds since the epoch, as ISO 8601 in UTC (valid in any [DateStyle]).
+val timestamptz : Ptime.t -> string
+(** As ISO 8601 in UTC, to the microsecond (valid in any [DateStyle]). Below the
+    microsecond, which a [timestamptz] cannot hold, is dropped towards the past.
 *)
 
-val to_date : string -> int option
-(** [YYYY-MM-DD] ([DateStyle=ISO]) as days since 1970-01-01. BC dates and years
-    past 9999 are [None]. *)
+val timestamp : Ptime.t -> string
+(** As ISO 8601 with no zone, for a [timestamp]: the reading in UTC, to the
+    microsecond. *)
 
-val to_timestamptz : string -> int option
-(** [DateStyle=ISO] output, in any time zone, as microseconds since the epoch.
-    BC dates, years past 9999 and [infinity] are [None]. *)
+val date : Ptime.date -> string
+(** [YYYY-MM-DD]. A date that is not one, or a year outside 1 to 9999, is the
+    server's to refuse. *)
+
+val to_date : string -> Ptime.date option
+(** [YYYY-MM-DD] ([DateStyle=ISO]). BC dates, years past 9999 and a date that is
+    not one are [None]. *)
+
+val to_timestamptz : string -> Ptime.t option
+(** [DateStyle=ISO] output, in any time zone. BC dates, years past 9999,
+    [infinity] and a time that is not one are [None]. *)
