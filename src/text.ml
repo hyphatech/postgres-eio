@@ -147,7 +147,9 @@ let us_per_hour = 3_600_000_000
 (* ISO 8601 with designators, which the server reads whatever its
    IntervalStyle: each part signed on its own, as an interval's are. The
    server reads a number with a fraction as a double, so the time is whole
-   hours and then seconds under an hour, both exact in a double. *)
+   hours, which a double holds exactly, then seconds under an hour, few
+   enough digits that the server's rounding to the microsecond recovers
+   them. *)
 let interval (i : Interval.t) =
   let sign = if i.microseconds < 0 then "-" else "" in
   (* Split before taking magnitudes: [abs min_int] is still negative. *)

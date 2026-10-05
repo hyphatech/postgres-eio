@@ -4094,11 +4094,14 @@ let () =
             QCheck_alcotest.to_alcotest an_int_reads_back;
             QCheck_alcotest.to_alcotest bytes_read_back;
             QCheck_alcotest.to_alcotest a_date_reads_back;
-            Alcotest.test_case "an OID is four unsigned bytes" `Quick
-              an_oid_is_four_unsigned_bytes;
-            Alcotest.test_case "a severity, by its unlocalised name" `Quick
-              a_severity_by_its_unlocalised_name;
           ] );
+      ( "types",
+        [
+          Alcotest.test_case "an OID is four unsigned bytes" `Quick
+            an_oid_is_four_unsigned_bytes;
+          Alcotest.test_case "a severity, by its unlocalised name" `Quick
+            a_severity_by_its_unlocalised_name;
+        ] );
       ( "the connection",
         match target with
         | Some _ -> connection_cases
