@@ -12,7 +12,7 @@
 val binary : int -> bool
 (** Whether this module decodes the type's binary form: [bool], [bytea], [int8],
     [int2], [int4], [text], [oid], [json], [float4], [float8], [varchar],
-    [date], [timestamp], [timestamptz], [uuid] and [jsonb]. *)
+    [date], [timestamp], [timestamptz], [interval], [uuid] and [jsonb]. *)
 
 val text : Column.t -> string -> string option
 (** The cell's text form. Binary cells are converted only for types whose text
@@ -26,6 +26,9 @@ val bool : Column.t -> string -> bool option
 val int : Column.t -> string -> int option
 (** [int2], [int4], [int8], [oid], or any integer in text; [None] if it exceeds
     OCaml's [int]. *)
+
+val int64 : Column.t -> string -> int64 option
+(** As {!int}, the whole of an [int8]'s range. *)
 
 val float : Column.t -> string -> float option
 (** [float4] and [float8], and any number in text. *)
@@ -42,6 +45,9 @@ val timestamp : Column.t -> string -> Ptime.t option
 
 val timestamptz : Column.t -> string -> Ptime.t option
 (** The instant, to the microsecond, whatever the session's time zone. *)
+
+val interval : Column.t -> string -> Interval.t option
+(** Its binary form, or its text in [IntervalStyle=postgres], the default. *)
 
 val json : Column.t -> string -> string option
 (** [json] and [jsonb]'s text; binary [jsonb] is a version byte before it. *)

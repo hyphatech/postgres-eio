@@ -12,7 +12,8 @@ First release.
   `.pgpass` on request.
 - Statement caching, pipelining, `execute_many`, text and binary results.
 - Cells read as OCaml values, text or binary alike: dates and instants as
-  `Ptime` values, uuids as `Uuidm.t`.
+  `Ptime` values, uuids as `Uuidm.t`, intervals as their months, days and
+  microseconds, and the whole of an `int8` as an `int64`.
 - COPY in and out, streamed.
 - LISTEN/NOTIFY with heartbeats and reconnection.
 - A connection pool that resets every connection it lends.

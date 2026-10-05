@@ -3,6 +3,7 @@ module Auth = Auth
 module Conninfo = Conninfo
 module Server_error = Server_error
 module Tag = Tag
+module Interval = Interval
 module Text = Text
 module Column = Column
 module Value = Value

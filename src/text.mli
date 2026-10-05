@@ -8,6 +8,12 @@ val int : int -> string
 val to_int : string -> int option
 (** Decimal, within OCaml's [int]. *)
 
+val int64 : int64 -> string
+(** In decimal. *)
+
+val to_int64 : string -> int64 option
+(** Decimal, the whole of an [int8]'s range. *)
+
 val float : float -> string
 (** 17 significant digits, so a double round-trips; [NaN] and infinities as
     Postgres spells them. *)
@@ -44,3 +50,12 @@ val to_date : string -> Ptime.date option
 val to_timestamptz : string -> Ptime.t option
 (** [DateStyle=ISO] output, in any time zone. BC dates, years past 9999,
     [infinity] and a time that is not one are [None]. *)
+
+val interval : Interval.t -> string
+(** As ISO 8601 with designators ([P14M3DT-1.500000S]), which the server reads
+    whatever its [IntervalStyle]. A part outside Postgres's range is the
+    server's to refuse. *)
+
+val to_interval : string -> Interval.t option
+(** [IntervalStyle=postgres] output, the default:
+    [1 year 2 mons -3 days -04:05:06.789]. Another style is [None]. *)

@@ -17,6 +17,7 @@ let varchar_oid = 1043
 let date_oid = 1082
 let timestamp_oid = 1114
 let timestamptz_oid = 1184
+let interval_oid = 1186
 let uuid_oid = 2950
 let jsonb_oid = 3802
 
@@ -37,6 +38,7 @@ let binary oid =
       date_oid;
       timestamp_oid;
       timestamptz_oid;
+      interval_oid;
       uuid_oid;
       jsonb_oid;
     ]
@@ -81,6 +83,38 @@ let int (c : Column.t) s =
           Some (Int32.to_int (String.get_int32_be s 0) land 0xFFFF_FFFF)
       | 8 when is c int8_oid -> int_of_int64 (String.get_int64_be s 0)
       | _ -> None)
+
+let int64 (c : Column.t) s =
+  match c.format with
+  | Column.Text -> Text.to_int64 s
+  | Column.Binary -> (
+      match String.length s with
+      | 2 when is c int2_oid -> Some (Int64.of_int (String.get_int16_be s 0))
+      | 4 when is c int4_oid -> Some (Int64.of_int32 (String.get_int32_be s 0))
+      | 4 when is c oid_oid ->
+          Some
+            (Int64.logand
+               (Int64.of_int32 (String.get_int32_be s 0))
+               0xFFFF_FFFFL)
+      | 8 when is c int8_oid -> Some (String.get_int64_be s 0)
+      | _ -> None)
+
+(* Microseconds, then days and months, as Postgres's [interval_send] writes
+   them; microseconds past OCaml's [int] are refused. *)
+let interval (c : Column.t) s =
+  match c.format with
+  | Column.Text -> Text.to_interval s
+  | Column.Binary ->
+      if not (is c interval_oid && String.length s = 16) then None
+      else
+        Option.map
+          (fun microseconds ->
+            {
+              Interval.months = Int32.to_int (String.get_int32_be s 12);
+              days = Int32.to_int (String.get_int32_be s 8);
+              microseconds;
+            })
+          (int_of_int64 (String.get_int64_be s 0))
 
 (* Round to single precision, so text and binary float4 agree. *)
 let single x = Int32.float_of_bits (Int32.bits_of_float x)

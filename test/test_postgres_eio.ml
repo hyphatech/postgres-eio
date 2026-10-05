@@ -867,6 +867,46 @@ let dates =
     ("2026-9-27", None);
   ]
 
+(* An interval as Postgres prints it by default, and the instant each part
+   means, computed by hand. *)
+let interval months days microseconds =
+  { Postgres_eio.Interval.months; days; microseconds }
+
+let interval_testable =
+  Alcotest.testable
+    (fun f (i : Postgres_eio.Interval.t) ->
+      Format.fprintf f "%d mons %d days %d us" i.months i.days i.microseconds)
+    Postgres_eio.Interval.equal
+
+let intervals =
+  [
+    ("1 year 2 mons 3 days 04:05:06.789", Some (interval 14 3 14_706_789_000));
+    ( "-1 years -2 mons +3 days -04:05:06",
+      Some (interval (-14) 3 (-14_706_000_000)) );
+    ("1 mon -1 days", Some (interval 1 (-1) 0));
+    ("1 day", Some (interval 0 1 0));
+    ("00:00:00", Some (interval 0 0 0));
+    ("-00:00:01.5", Some (interval 0 0 (-1_500_000)));
+    ("00:00:00.000001", Some (interval 0 0 1));
+    ("1281023893:59:59.999999", Some (interval 0 0 4_611_686_018_399_999_999));
+    ("2562047788:00:54.775807", None);
+    ("04:60:00", None);
+    ("1 fortnight", None);
+    ("@ 1 year", None);
+    ("P1Y", None);
+    ("", None);
+  ]
+
+let reads_an_interval (text, expected) =
+  Alcotest.test_case ("an interval " ^ text) `Quick (fun () ->
+      Alcotest.(check (option interval_testable))
+        text expected (Text.to_interval text))
+
+let an_int64_reads_back =
+  QCheck2.Test.make ~count:1000 ~name:"an int64 written reads back as itself"
+    QCheck2.Gen.int64 (fun n ->
+      Option.equal Int64.equal (Text.to_int64 (Text.int64 n)) (Some n))
+
 let reads_a_date (text, expected) =
   Alcotest.test_case ("a date " ^ text) `Quick (fun () ->
       Alcotest.(check (option (triple int int int)))
@@ -2802,6 +2842,9 @@ let every_type =
     ("'2026-09-27 10:00:00.123456+02'", "timestamptz");
     ("'1900-01-01 00:00:00+00'", "timestamptz");
     ("'infinity'", "timestamptz");
+    ("'1 year 2 mons -3 days 04:05:06.789'", "interval");
+    ("'-178000000 years'", "interval");
+    ("'0'", "interval");
     ({|'{"a": [1, 2.5], "b": null}'|}, "json");
     ({|'{"b": null, "a": [1, 2.5]}'|}, "jsonb");
     ("null", "int4");
@@ -2815,7 +2858,11 @@ let decoded (c : Pg.Column.t) cell =
       let text = show Fun.id (Value.text c s) in
       match c.type_oid with
       | 16 -> show string_of_bool (Value.bool c s)
-      | 20 | 21 | 23 | 26 -> show string_of_int (Value.int c s) ^ " " ^ text
+      | 20 | 21 | 23 | 26 ->
+          show string_of_int (Value.int c s)
+          ^ " "
+          ^ show Int64.to_string (Value.int64 c s)
+          ^ " " ^ text
       | 700 | 701 -> show (Printf.sprintf "%h") (Value.float c s)
       | 17 -> show hex (Value.bytes c s)
       | 25 | 1043 -> text
@@ -2826,6 +2873,11 @@ let decoded (c : Pg.Column.t) cell =
             (Value.date c s)
       | 1114 -> show (fun t -> string_of_int (us_of t)) (Value.timestamp c s)
       | 1184 -> show (fun t -> string_of_int (us_of t)) (Value.timestamptz c s)
+      | 1186 ->
+          show
+            (fun (i : Postgres_eio.Interval.t) ->
+              Printf.sprintf "%d %d %d" i.months i.days i.microseconds)
+            (Value.interval c s)
       | 114 | 3802 -> show Fun.id (Value.json c s) ^ " " ^ text
       | oid -> Printf.sprintf "a type %d" oid)
 
@@ -2906,6 +2958,17 @@ let binary_values_are_the_values () =
   Alcotest.(check (option string))
     "a uuid" (Some "0190c0fe-1234-7abc-8def-0123456789ab")
     (Option.map Uuidm.to_string (Value.uuid c s));
+  let c, s = one_binary "select '1 mon -1 days -00:00:01.5'::interval" in
+  Alcotest.(check (option interval_testable))
+    "an interval, each part apart"
+    (Some (interval 1 (-1) (-1_500_000)))
+    (Value.interval c s);
+  let c, s = one_binary "select (-9223372036854775807 - 1)::int8" in
+  Alcotest.(check (option int64))
+    "an int8 at its least" (Some Int64.min_int) (Value.int64 c s);
+  let c, s = one_binary "select 4294967295::oid" in
+  Alcotest.(check (option int64))
+    "an oid, unsigned" (Some 4_294_967_295L) (Value.int64 c s);
   let c, s = one_binary "select 0.1::float4" in
   Alcotest.(check (option (float 0.)))
     "a float4, as the single it is"
@@ -3085,6 +3148,44 @@ let an_instant_in_every_zone () =
 
 (* A date and a timestamp written as text are read by the server as the same
    date and the same reading, whatever the session's time zone. *)
+(* An interval written as ISO 8601 is the interval the server reads, whatever
+   its IntervalStyle, and Postgres's own text of it reads back the same. *)
+let an_interval_bound () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  let back style i =
+    script t (Printf.sprintf "set intervalstyle = '%s'" style);
+    let read =
+      one t "select $1::interval = $2::interval"
+        [
+          Some (Text.interval i);
+          Some
+            (Printf.sprintf "%d months %d days %d microseconds" i.months i.days
+               i.microseconds);
+        ]
+    in
+    Alcotest.(check string) (style ^ ": the same interval") "t" read
+  in
+  List.iter
+    (fun i ->
+      back "iso_8601" i;
+      back "postgres" i;
+      Alcotest.(check (option interval_testable))
+        "and its text reads back" (Some i)
+        (Text.to_interval
+           (one t "select $1::interval::text" [ Some (Text.interval i) ])))
+    [
+      interval 14 3 14_706_789_000;
+      interval (-14) 3 (-14_706_000_000);
+      interval 1 (-1) 0;
+      interval 0 0 (-1_500_000);
+      interval 0 0 0;
+    ];
+  Alcotest.(check string)
+    "an int8 at its greatest" "9223372036854775807"
+    (one t "select $1::int8::text" [ Some (Text.int64 Int64.max_int) ]);
+  Pg.close t
+
 let a_date_and_a_timestamp_bound () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
@@ -3238,6 +3339,7 @@ let connection_cases =
       an_instant_in_every_zone;
     Alcotest.test_case "a date and a timestamp, bound" `Quick
       a_date_and_a_timestamp_bound;
+    Alcotest.test_case "an interval and an int8, bound" `Quick an_interval_bound;
     Alcotest.test_case "54.2.10 a name TLS cannot carry" `Quick
       a_name_tls_cannot_carry;
     Alcotest.test_case "54.3.1 a sign-in bound to TLS" `Quick
@@ -3778,7 +3880,11 @@ let () =
       ( "text forms",
         List.map reads_an_instant instants
         @ List.map reads_a_date dates
-        @ [ QCheck_alcotest.to_alcotest a_float_reads_back ] );
+        @ List.map reads_an_interval intervals
+        @ [
+            QCheck_alcotest.to_alcotest a_float_reads_back;
+            QCheck_alcotest.to_alcotest an_int64_reads_back;
+          ] );
       ( "the connection",
         match target with
         | Some _ -> connection_cases

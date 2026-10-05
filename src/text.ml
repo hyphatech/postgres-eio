@@ -1,5 +1,7 @@
 let int = string_of_int
 let to_int = int_of_string_opt
+let int64 = Int64.to_string
+let to_int64 = Int64.of_string_opt
 
 (* 17 significant digits round-trip a double exactly. *)
 let float f =
@@ -138,3 +140,76 @@ let to_timestamptz s =
     (days_from_civil y mo d * 86_400) + (h * 3600) + (mi * 60) + sec - offset_s
   in
   Instant.of_us ((seconds * 1_000_000) + frac)
+
+(* ISO 8601 with designators, which the server reads whatever its
+   IntervalStyle: each part signed on its own, as an interval's are. *)
+let interval (i : Interval.t) =
+  let sign = if i.microseconds < 0 then "-" else "" in
+  let us = abs i.microseconds in
+  Printf.sprintf "P%dM%dDT%s%d.%06dS" i.months i.days sign (us / 1_000_000)
+    (us mod 1_000_000)
+
+(* The most hours whose microseconds fit OCaml's [int]; Postgres keeps an
+   [int64], and an interval past this is refused as an [int8] past it is. *)
+let max_hours = (max_int / 3_600_000_000) - 1
+
+(* [IntervalStyle=postgres], the default: [1 year 2 mons -3 days
+   -04:05:06.789], each part signed on its own, a part that is zero left out,
+   the time last, and [00:00:00] for no time at all. *)
+let to_interval s =
+  let ( let* ) = Option.bind in
+  let natural t =
+    if String.length t > 0 && String.for_all (fun c -> c >= '0' && c <= '9') t
+    then int_of_string_opt t
+    else None
+  in
+  let signed t =
+    let n = String.length t in
+    if n > 1 && Char.equal t.[0] '-' then
+      Option.map Int.neg (natural (String.sub t 1 (n - 1)))
+    else if n > 1 && Char.equal t.[0] '+' then natural (String.sub t 1 (n - 1))
+    else natural t
+  in
+  let time t =
+    let n = String.length t in
+    let negative = n > 0 && Char.equal t.[0] '-' in
+    let t =
+      if n > 0 && (negative || Char.equal t.[0] '+') then String.sub t 1 (n - 1)
+      else t
+    in
+    match String.split_on_char ':' t with
+    | [ h; m; sec ] ->
+        let whole, frac =
+          match String.split_on_char '.' sec with
+          | [ whole ] -> (whole, Some 0)
+          | [ whole; f ] when String.length f <= 6 ->
+              (whole, natural (f ^ String.make (6 - String.length f) '0'))
+          | _ -> (sec, None)
+        in
+        let* h = natural h in
+        let* m = natural m in
+        let* whole = natural whole in
+        let* frac = frac in
+        if h > max_hours || m >= 60 || whole >= 60 then None
+        else
+          let us = (((((h * 60) + m) * 60) + whole) * 1_000_000) + frac in
+          Some (if negative then -us else us)
+    | _ -> None
+  in
+  let rec parts (acc : Interval.t) = function
+    | [ t ] ->
+        let* microseconds = time t in
+        Some { acc with microseconds }
+    | n :: unit :: rest -> (
+        let* n = signed n in
+        let* acc =
+          match unit with
+          | "year" | "years" -> Some { acc with months = acc.months + (12 * n) }
+          | "mon" | "mons" -> Some { acc with months = acc.months + n }
+          | "day" | "days" -> Some { acc with days = acc.days + n }
+          | _ -> None
+        in
+        match rest with [] -> Some acc | _ -> parts acc rest)
+    | [] -> None
+  in
+  parts { months = 0; days = 0; microseconds = 0 } (String.split_on_char ' ' s)
