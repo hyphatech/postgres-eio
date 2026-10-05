@@ -24,9 +24,9 @@ val create :
   ?idle_check_s:float ->
   Conninfo.t ->
   (t, Connection.error) result
-(** Opens [size] (8) connections as {!Postgres_eio.connect} does, or returns the
-    first error after closing those already open. [wait_s] (5) is the default
-    borrow wait.
+(** Opens [size] (8) connections, and at least one, as {!Postgres_eio.connect}
+    does, or returns the first error after closing those already open. [wait_s]
+    (5) is the default borrow wait.
 
     On return, a reset is sent but not awaited: [DISCARD ALL] minus prepared
     statements and plans, which borrowers share

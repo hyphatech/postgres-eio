@@ -3738,7 +3738,10 @@ let the_pools_figures () =
   Alcotest.(check (triple int int int))
     "both borrowed, one waiting" (2, 0, 1) !seen;
   Alcotest.(check (triple int int int)) "all back" (2, 2, 0) (figures ());
-  Pg.Pool.close p
+  Pg.Pool.close p;
+  let none = pool ~size:0 env sw in
+  Alcotest.(check int) "at least one" 1 (Pg.Pool.stats none).size;
+  Pg.Pool.close none
 
 let closing_a_pool_waits_for_its_borrows () =
   with_eio @@ fun env sw ->
