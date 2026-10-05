@@ -966,7 +966,13 @@ let an_oid_is_four_unsigned_bytes () =
       (23, Some 23);
       (4294967295, Some 4294967295);
       (4294967296, None);
-    ]
+    ];
+  Alcotest.(check bool)
+    "equal to itself" true
+    (Postgres_eio.Oid.equal (oid 23) (oid 23));
+  Alcotest.(check bool)
+    "not to another" false
+    (Postgres_eio.Oid.equal (oid 23) (oid 25))
 
 (* V is never localised, so it decides; S stands in only without it. *)
 let a_severity_by_its_unlocalised_name () =
@@ -1500,7 +1506,25 @@ let a_server_error_keeps_the_connection () =
         | _ -> false);
       Alcotest.(check bool)
         "every field kept" true
-        (Option.is_some (Pg.Server_error.field e 'R'))
+        (Option.is_some (Pg.Server_error.field e 'R'));
+      Alcotest.(check bool)
+        "in the order sent, severity first" true
+        (match Pg.Server_error.fields e with
+        | ('S', _) :: rest -> List.mem_assoc 'C' rest && List.mem_assoc 'M' rest
+        | _ -> false);
+      Alcotest.(check (option string)) "no hint" None (Pg.Server_error.hint e)
+  | _ -> Alcotest.fail "not the server's error");
+  (match
+     Pg.query t "select no_such_function(1)" ~params:[] ~init:()
+       ~row:(fun () _ -> ())
+   with
+  | Error (Pg.Server e) ->
+      Alcotest.(check string)
+        "an undefined function" "42883"
+        (Pg.Server_error.sqlstate e);
+      Alcotest.(check bool)
+        "and the server's hint" true
+        (Option.is_some (Pg.Server_error.hint e))
   | _ -> Alcotest.fail "not the server's error");
   script t "create temp table u (n int constraint u_n unique)";
   script t "insert into u values (1)";
@@ -2523,11 +2547,13 @@ let the_cache_is_sized_or_off () =
     (fun n -> ignore (value t (Printf.sprintf "select %d" n) []))
     [ 1; 2; 3; 4; 5 ];
   Alcotest.(check int) "54.2.3 the least recently used are closed" 2 (ours t);
+  Alcotest.(check int) "its size, as made" 2 (Pg.statement_cache t);
   Pg.close t;
   let t = connect_cached ~statement_cache:0 env sw (plain ()) in
   Alcotest.(check string) "off, it still answers" "1" (value t "select 1" []);
   Alcotest.(check string) "and again" "1" (value t "select 1" []);
   Alcotest.(check int) "and parses nothing to keep" 0 (ours t);
+  Alcotest.(check int) "its size, none" 0 (Pg.statement_cache t);
   Pg.close t
 
 (* A cached statement whose result type changed is reparsed outside a
