@@ -51,9 +51,8 @@ Each rule comes with why it exists and the test that catches a break.
 - **Every protocol requirement the driver meets has a test case named by
   its section** of chapter 54 of the Postgres 18 docs (e.g. `54.2.4 ...`).
   Backend messages are read whole, a byte at a time, and at generated
-  splits. A requirement the driver does not meet may be listed under *Not
-  implemented* in the README. Why: review by example misses the
-  requirement nobody thought of.
+  splits. Why: review by example misses the requirement nobody thought
+  of.
 - **The driver reads only what the connection string names, unless the
   caller hands it more.** Files only from `sslrootcert`, `sslcert` and
   `sslkey`. The system CAs only for a verified mode with no `sslrootcert`.

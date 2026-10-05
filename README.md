@@ -177,10 +177,6 @@ three 5 s runs.
 Each module's interface (`.mli`) is its reference: `make doc` builds it
 with odoc. Start with `Postgres_eio` (connections), `Pool` and `Conninfo`.
 
-## Not implemented
-
-- **OAuth** sign-in (Postgres 18's `oauth` method).
-
 ## Contributing
 
 See [AGENTS.md](AGENTS.md).
