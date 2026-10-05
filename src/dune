@@ -1,0 +1,23 @@
+(library
+ (name postgres_eio)
+ (public_name postgres-eio)
+ (libraries
+  eio
+  eio.unix
+  unix
+  tls
+  tls-eio
+  x509
+  ca-certs
+  ptime
+  ptime.clock
+  mirage-crypto-rng
+  mirage-crypto-rng.unix
+  domain-name
+  ipaddr
+  digestif
+  base64
+  cstruct
+  mtime
+  logs
+  uunf))

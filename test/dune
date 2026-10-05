@@ -1,0 +1,28 @@
+(test
+ (name test_postgres_eio)
+ (modules test_postgres_eio)
+ (libraries
+  postgres-eio
+  cstruct
+  eio
+  eio_main
+  mtime
+  logs
+  unix
+  alcotest
+  qcheck-core
+  qcheck-alcotest)
+ (deps
+  (glob_files postgres/*.crt)
+  postgres/client.key
+  postgres/client-encrypted.key))
+
+; The house rules, read off the source.
+
+(test
+ (name test_style)
+ (modules test_style)
+ (libraries alcotest)
+ (deps
+  (glob_files ../src/*.ml)
+  (glob_files ../src/*.mli)))

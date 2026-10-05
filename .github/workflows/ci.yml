@@ -1,0 +1,24 @@
+# Checks are defined in the Makefile. 5.4 is the supported minimum.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ocaml: ["5.4", "5.5"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml }}
+      - run: opam install . --deps-only --with-test --with-dev-setup -y
+      # Use setup-ocaml's switch instead of the Makefile's local one.
+      - run: make lint OPAM="opam exec --"
+      - run: make test OPAM="opam exec --"
