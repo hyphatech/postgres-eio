@@ -172,7 +172,6 @@ postgres-eio 0.1.0, postgres_async 0.17.0, postgresql 5.4.0. Apple M4 Pro,
 Postgres 18.6 in Docker, one connection per driver, text results, median of
 three 5 s runs.
 
-
 ## Documentation
 
 Each module's interface (`.mli`) is its reference: `make doc` builds it
