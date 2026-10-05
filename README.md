@@ -166,12 +166,12 @@ native OCaml driver on Async, and libpq, the C library, through the
 | Insert, one round trip each | 323 µs | 603 µs | 296 µs |
 | Insert, 1,000 pipelined in one round trip | 3.2 µs | n/a | n/a |
 | Read a 100,000-row result, per row | 157 ns | 168 ns | 186 ns |
+| Client CPU per round trip | 30 µs | 44 µs | 15 µs |
 
-Apple M4 Pro, Postgres 18.6 in Docker, one connection per driver, text
-results, median of three 5 s runs, October 2026. On macOS most of a round
-trip is Docker's port forwarding, so the gaps between drivers would be
-larger on a real network. libpq spends about half the CPU per round trip
-(15 µs against 30 µs).
+postgres-eio 0.1.0, postgres_async 0.17.0, postgresql 5.4.0. Apple M4 Pro,
+Postgres 18.6 in Docker, one connection per driver, text results, median of
+three 5 s runs.
+
 
 ## Documentation
 
