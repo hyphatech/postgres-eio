@@ -7,7 +7,11 @@
     Text [float4] is rounded to single precision so it matches binary, given
     [extra_float_digits >= 1] (the default since Postgres 12). Text dates and
     times are read in [DateStyle=ISO]. An instant within a day of year 1 or
-    10000 may print, in a distant time zone, as a year no decoder reads. *)
+    10000 may print, in a distant time zone, as a year no decoder reads.
+
+    A type with no reader here -- [numeric], [time], a range, [inet] -- is
+    always sent as text, since {!binary} asks for no other, and {!text} hands
+    it over as the server printed it. *)
 
 val binary : int -> bool
 (** Whether this module decodes the type's binary form: [bool], [bytea], [int8],
