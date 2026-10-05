@@ -3187,8 +3187,6 @@ let an_instant_in_every_zone () =
     [ "UTC"; "Asia/Kolkata"; "America/New_York"; "Europe/Amsterdam" ];
   Pg.close t
 
-(* A date and a timestamp written as text are read by the server as the same
-   date and the same reading, whatever the session's time zone. *)
 (* An interval written as ISO 8601 is the interval the server reads, whatever
    its IntervalStyle, and Postgres's own text of it reads back the same. *)
 let an_interval_bound () =
@@ -3242,6 +3240,8 @@ let an_interval_bound () =
     (one t "select $1::int8::text" [ Some (Text.int64 Int64.max_int) ]);
   Pg.close t
 
+(* A date and a timestamp written as text are read by the server as the same
+   date and the same reading, whatever the session's time zone. *)
 let a_date_and_a_timestamp_bound () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in

@@ -145,6 +145,11 @@ let waited t link f =
 (* Written in pieces so a slow but live server counts as progress. *)
 let piece = 65536
 
+(* Larger than one TLS read can return (16 KiB record + 4 KiB), so no
+   plaintext is left buffered inside tls-eio, invisible to a listener waiting
+   on socket readiness. *)
+let read_size = 65536
+
 let write t link bytes =
   let n = String.length bytes in
   link.writing <- true;
@@ -770,10 +775,7 @@ let attempt t endpoint address ~tls =
         socket;
         flow;
         reader = P.reader ();
-        (* Larger than one TLS read can return (16 KiB record + 4 KiB), so no
-   plaintext is left buffered inside tls-eio, invisible to a listener
-   waiting on socket readiness. *)
-        buf = Cstruct.create 65536;
+        buf = Cstruct.create read_size;
         outgoing = Cstruct.create piece;
         secure;
         server_certificate;
@@ -1254,8 +1256,6 @@ let concluded t link use ~parsed failed =
   | Again (_, { prepared = Unparsed e; _ }), Some _ -> Some e
   | (First _ | Again _), Some _ -> failed
 
-(* 54.2.3: always read to ReadyForQuery; after an error the server skips
-   to the Sync. *)
 (* Describe reports text; apply the formats the Bind asked for. *)
 let as_bound described (results : P.format array) =
   if Array.length results = 0 then described
@@ -1265,6 +1265,8 @@ let as_bound described (results : P.format array) =
         if i < Array.length results then { c with format = results.(i) } else c)
       described
 
+(* 54.2.3: always read to ReadyForQuery; after an error the server skips
+   to the Sync. *)
 let read_statement t link use ~results ~columns ~init ~row =
   let rec loop acc tag failed parsed =
     match message t link with
@@ -1734,9 +1736,12 @@ let copy_in_with t sql send =
   | Ok (Raised (ex, bt)) -> Printexc.raise_with_backtrace ex bt
   | Error e -> Error e
 
+(* Bytes per CopyData: enough that one write carries many rows. *)
+let copy_chunk = 65536
+
 let copy_in t sql source =
   copy_in_with t sql (fun link ~stop ->
-      let buf = Cstruct.create 65536 in
+      let buf = Cstruct.create copy_chunk in
       let rec go () =
         if not (stop ()) then
           match Eio.Flow.single_read source buf with
@@ -1778,9 +1783,6 @@ let add_row b cells =
             v)
     cells;
   Buffer.add_char b '\n'
-
-(* Batch rows to avoid a syscall per row. *)
-let copy_chunk = 65536
 
 let copy_in_rows t ?schema ~table ~columns rows =
   let ( let* ) = Result.bind in
@@ -1884,7 +1886,7 @@ let unescape field =
     let hex c = Option.is_some (value c) in
     let rec go i =
       if i >= n then ()
-      else if field.[i] <> '\\' || i + 1 = n then (
+      else if (not (Char.equal field.[i] '\\')) || i + 1 = n then (
         Buffer.add_char b field.[i];
         go (i + 1))
       else
@@ -2138,8 +2140,13 @@ module Listener = struct
     t.channels <- List.filter (fun c -> not (String.equal c channel)) t.channels;
     Ok ()
 
-  (* Transport failures retry with backoff from 1 s to 30 s (the server may
-   be restarting); a server refusal is returned. *)
+  (* Transport failures retry with backoff (the server may be restarting):
+     at once, then doubling from a second, so a restart is caught quickly,
+     up to half a minute, so a long outage is not hammered. A server refusal
+     is returned. *)
+  let first_retry_s = 1.
+  let last_retry_s = 30.
+
   let reconnect t =
     let again () =
       let* () = reset t.conn in
@@ -2159,9 +2166,9 @@ module Listener = struct
               m "a listener could not reconnect, and tries again in %gs: %s"
                 wait_s (error_to_string e));
           Eio.Time.Mono.sleep t.conn.clock wait_s;
-          attempt (Float.min 30. (wait_s *. 2.))
+          attempt (Float.min last_retry_s (wait_s *. 2.))
     in
-    attempt 1.
+    attempt first_retry_s
 
   let lost t e =
     Log.warn (fun m ->

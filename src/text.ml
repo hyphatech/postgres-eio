@@ -71,6 +71,7 @@ let iso ~zone t =
 let timestamptz t = iso ~zone:"Z" t
 let timestamp t = iso ~zone:"" t
 let date (y, m, d) = Printf.sprintf "%04d-%02d-%02d" y m d
+let is_digit = function '0' .. '9' -> true | _ -> false
 
 let digits s i n =
   if i + n > String.length s then None
@@ -109,11 +110,11 @@ let to_timestamptz s =
   let* _ = Ptime.of_date_time ((y, mo, d), ((h, mi, sec), 0)) in
   let i, frac =
     if at 19 '.' then
-      let rec fend j =
-        if j < String.length s && s.[j] >= '0' && s.[j] <= '9' then fend (j + 1)
+      let rec fraction_end j =
+        if j < String.length s && is_digit s.[j] then fraction_end (j + 1)
         else j
       in
-      let j = fend 20 in
+      let j = fraction_end 20 in
       let f = String.sub (String.sub s 20 (j - 20) ^ "000000") 0 6 in
       (j, int_of_string_opt f)
     else (19, Some 0)
@@ -161,8 +162,7 @@ let interval (i : Interval.t) =
 let to_interval s =
   let ( let* ) = Option.bind in
   let natural t =
-    if String.length t > 0 && String.for_all (fun c -> c >= '0' && c <= '9') t
-    then int_of_string_opt t
+    if String.length t > 0 && String.for_all is_digit t then int_of_string_opt t
     else None
   in
   let signed t =

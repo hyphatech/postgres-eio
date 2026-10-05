@@ -214,6 +214,10 @@ let tidy t =
   done;
   List.iter (renew t) !due
 
+(* Passes per [min idle_check_s max_lifetime_s], so a connection is
+   replaced or checked at most a quarter of that period late. *)
+let passes_per_period = 4.
+
 let housekeeping t ~every =
   let rec loop () =
     Eio.Time.Mono.sleep t.clock every;
@@ -262,7 +266,8 @@ let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
       List.iter (fun c -> Eio.Stream.add t.free (entry t c)) all;
       (* A daemon, so it does not keep the switch open. *)
       Eio.Fiber.fork_daemon ~sw (fun () ->
-          housekeeping t ~every:(Float.min max_lifetime_s idle_check_s /. 4.);
+          housekeeping t
+            ~every:(Float.min max_lifetime_s idle_check_s /. passes_per_period);
           `Stop_daemon);
       t)
     (go (max 1 size) [])
