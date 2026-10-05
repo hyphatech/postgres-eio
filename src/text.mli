@@ -52,8 +52,8 @@ val to_timestamptz : string -> Ptime.t option
     [infinity] and a time that is not one are [None]. *)
 
 val interval : Interval.t -> string
-(** As ISO 8601 with designators ([P14M3DT-1.500000S]), which the server reads
-    whatever its [IntervalStyle]. A part outside Postgres's range is the
+(** As ISO 8601 with designators ([P14M3DT-0H-1.500000S]), which the server
+    reads whatever its [IntervalStyle]. A part outside Postgres's range is the
     server's to refuse. *)
 
 val to_interval : string -> Interval.t option

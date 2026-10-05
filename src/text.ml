@@ -141,17 +141,19 @@ let to_timestamptz s =
   in
   Instant.of_us ((seconds * 1_000_000) + frac)
 
+let us_per_hour = 3_600_000_000
+
 (* ISO 8601 with designators, which the server reads whatever its
-   IntervalStyle: each part signed on its own, as an interval's are. *)
+   IntervalStyle: each part signed on its own, as an interval's are. The
+   server reads a number with a fraction as a double, so the time is whole
+   hours and then seconds under an hour, both exact in a double. *)
 let interval (i : Interval.t) =
   let sign = if i.microseconds < 0 then "-" else "" in
-  let us = abs i.microseconds in
-  Printf.sprintf "P%dM%dDT%s%d.%06dS" i.months i.days sign (us / 1_000_000)
-    (us mod 1_000_000)
-
-(* The most hours whose microseconds fit OCaml's [int]; Postgres keeps an
-   [int64], and an interval past this is refused as an [int8] past it is. *)
-let max_hours = (max_int / 3_600_000_000) - 1
+  (* Split before taking magnitudes: [abs min_int] is still negative. *)
+  let hours = abs (i.microseconds / us_per_hour) in
+  let rest = abs (i.microseconds mod us_per_hour) in
+  Printf.sprintf "P%dM%dDT%s%dH%s%d.%06dS" i.months i.days sign hours sign
+    (rest / 1_000_000) (rest mod 1_000_000)
 
 (* [IntervalStyle=postgres], the default: [1 year 2 mons -3 days
    -04:05:06.789], each part signed on its own, a part that is zero left out,
@@ -190,10 +192,19 @@ let to_interval s =
         let* m = natural m in
         let* whole = natural whole in
         let* frac = frac in
-        if h > max_hours || m >= 60 || whole >= 60 then None
+        if m >= 60 || whole >= 60 then None
         else
-          let us = (((((h * 60) + m) * 60) + whole) * 1_000_000) + frac in
-          Some (if negative then -us else us)
+          (* Postgres keeps an [int64]; past OCaml's [int] is refused, as an
+             [int8] past it is. A negative time reaches one microsecond
+             further, to [min_int], so its bound is worked out below zero. *)
+          let rest = (((m * 60) + whole) * 1_000_000) + frac in
+          let most_hours =
+            if negative then (min_int + rest) / -us_per_hour
+            else (max_int - rest) / us_per_hour
+          in
+          if h > most_hours then None
+          else if negative then Some (-(h * us_per_hour) - rest)
+          else Some ((h * us_per_hour) + rest)
     | _ -> None
   in
   let rec parts (acc : Interval.t) = function

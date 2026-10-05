@@ -889,6 +889,10 @@ let intervals =
     ("-00:00:01.5", Some (interval 0 0 (-1_500_000)));
     ("00:00:00.000001", Some (interval 0 0 1));
     ("1281023893:59:59.999999", Some (interval 0 0 4_611_686_018_399_999_999));
+    ("1281023894:00:27.387903", Some (interval 0 0 max_int));
+    ("1281023894:00:27.387904", None);
+    ("-1281023894:00:27.387904", Some (interval 0 0 min_int));
+    ("-1281023894:00:27.387905", None);
     ("2562047788:00:54.775807", None);
     ("04:60:00", None);
     ("1 fortnight", None);
@@ -3166,6 +3170,27 @@ let an_interval_bound () =
     in
     Alcotest.(check string) (style ^ ": the same interval") "t" read
   in
+  let chosen =
+    [
+      interval 14 3 14_706_789_000;
+      interval (-14) 3 (-14_706_000_000);
+      interval 1 (-1) 0;
+      interval 0 0 (-1_500_000);
+      interval 0 0 0;
+      interval 0 0 max_int;
+      interval 0 0 min_int;
+    ]
+  in
+  (* A fixed seed, so a failure names the same intervals when run again. *)
+  let generated =
+    QCheck2.Gen.(
+      generate ~n:300
+        ~rand:(Random.State.make [| 54 |])
+        (map3 interval
+           (int_range (-1_000_000) 1_000_000)
+           (int_range (-1_000_000) 1_000_000)
+           int))
+  in
   List.iter
     (fun i ->
       back "iso_8601" i;
@@ -3174,13 +3199,7 @@ let an_interval_bound () =
         "and its text reads back" (Some i)
         (Text.to_interval
            (one t "select $1::interval::text" [ Some (Text.interval i) ])))
-    [
-      interval 14 3 14_706_789_000;
-      interval (-14) 3 (-14_706_000_000);
-      interval 1 (-1) 0;
-      interval 0 0 (-1_500_000);
-      interval 0 0 0;
-    ];
+    (chosen @ generated);
   Alcotest.(check string)
     "an int8 at its greatest" "9223372036854775807"
     (one t "select $1::int8::text" [ Some (Text.int64 Int64.max_int) ]);
