@@ -70,6 +70,14 @@
    (and
     :with-test
     (>= 0.91)))
+  (merlin
+   (and
+    :with-dev-setup
+    (>= 5.6-504)))
+  (ocaml-lsp-server
+   (and
+    :with-dev-setup
+    (>= 1.24.0)))
   (ocamlformat
    (and
     :with-dev-setup
