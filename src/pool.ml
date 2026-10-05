@@ -33,6 +33,9 @@ type t = {
   idle_check : Mtime.Span.t;
   waiting : int Atomic.t;
   replaced : int Atomic.t;
+  (* Its own, seeded: the stdlib's starts alike in every process, so pools
+     started together would replace their connections together. *)
+  random : Random.State.t;
 }
 
 type stats = { size : int; idle : int; waiting : int; replaced : int }
@@ -45,7 +48,7 @@ let now t = Eio.Time.Mono.now t.clock
 (* Jitter of ±10%, so connections made together are not replaced together. *)
 let entry t conn =
   let made = now t in
-  let jitter = 0.9 +. Random.float 0.2 in
+  let jitter = 0.9 +. Random.State.float t.random 0.2 in
   let lifetime = span (Mtime.Span.to_float_ns t.lifetime *. jitter /. 1e9) in
   {
     conn;
@@ -253,6 +256,7 @@ let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
           idle_check = span idle_check_s;
           waiting = Atomic.make 0;
           replaced = Atomic.make 0;
+          random = Random.State.make_self_init ();
         }
       in
       List.iter (fun c -> Eio.Stream.add t.free (entry t c)) all;

@@ -1979,10 +1979,17 @@ let several_hosts () =
   done;
   Alcotest.(check (pair int int))
     "in order, the first every time" (10, 0) (!taken_a, !taken_b);
+  let application's = Random.get_state () in
   for _ = 1 to 30 do
     Pg.close (connect env sw { both with load_balance_hosts = Random })
   done;
-  Alcotest.(check bool) "at random, both" true (!taken_a > 10 && !taken_b > 0)
+  Alcotest.(check bool) "at random, both" true (!taken_a > 10 && !taken_b > 0);
+  (* The stdlib's generator starts from a fixed seed in every process, so
+     shuffling with it would send every client to the same host first. *)
+  Alcotest.(check int)
+    "the application's generator untouched"
+    (Random.State.bits application's)
+    (Random.bits ())
 
 (* Regression: a refused address's socket is closed at once, not held on
    the switch. With [::1] refused by an IPv4-only port forward, every

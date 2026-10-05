@@ -844,14 +844,18 @@ let suits t (wanted : C.session_attrs) =
                "the server does not say whether it is a standby, as Postgres \
                 14 and later do"))
 
+(* A generator seeded for each shuffle: the stdlib's global one starts
+   from a fixed seed in every process, which would send every client to the
+   same host first, and it is the application's. *)
 let shuffled t l =
   match t.conninfo.load_balance_hosts with
   | C.In_order -> l
   | C.Random ->
+      let random = Random.State.make_self_init () in
       List.map snd
         (List.sort
            (fun (a, _) (b, _) -> Int.compare a b)
-           (List.map (fun x -> (Random.bits (), x)) l))
+           (List.map (fun x -> (Random.State.bits random, x)) l))
 
 let session_attrs_name = function
   | C.Any -> "any"
