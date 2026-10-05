@@ -118,11 +118,19 @@ A change is done when every box holds:
   test wherever a round trip exists, and the real server wherever a test
   can run one, never a mock of it; a stub stands in only for a third
   party's service.
-- [ ] **No partial functions**: no `failwith`, `invalid_arg`, `Option.get`,
-  `Result.get_ok`, `List.hd`, `List.tl`, `List.nth`, `Obj.magic`. Errors are
-  values: a `result` with a variant error, and `let*` over it.
+- [ ] **No partial functions**: nothing raises on an input the code has not
+  ruled out. No `failwith`, `invalid_arg`, `Option.get`, `Result.get_ok`,
+  `List.hd`, `List.tl`, `List.nth`, `Obj.magic`; and a stdlib call that
+  raises -- `String.sub`, an index, `Hashtbl.find`, `List.assoc`,
+  `int_of_string`, `Char.chr`, `List.combine` -- only on an input already
+  known to be in range, else its `_opt`. Errors are values: a `result` with
+  a variant error, and `let*` over it.
 - [ ] **No polymorphic `compare`**, and no `=` on a type that has a module:
-  `Int.compare`, `String.equal`, `Char.equal`. `=` on `int` is fine.
+  `Int.compare`, `String.equal`, `Char.equal`. `=` on `int` is fine. It also
+  hides in `List.mem`, `List.assoc`, `List.sort compare`, `max`, `min` and a
+  `Hashtbl`'s keys: accepted over plain data -- an `int`, a `char`, a
+  `string` -- where nothing can hold a closure or an abstract type, and this
+  rule broken over anything else.
 - [ ] **No `open`.** Alias modules instead: `module P = Protocol`.
 - [ ] **No silenced warnings.** The warning set in `dune` is the linter, and
   a warning that looks wrong is a code shape that is wrong.
@@ -138,7 +146,9 @@ A change is done when every box holds:
   that names its unit at every call (`~timeout_s`) is enough.
 - [ ] **Cancellation leaves nothing held.** A fiber cancelled at any effect
   releases what it held: a connection goes back to its pool or is closed,
-  and a lock is let go.
+  and a lock is let go. A catch-all handler (`with _ ->`,
+  `| exception _ ->`) re-raises `Eio.Cancel.Cancelled` before anything else,
+  or it swallows the cancellation.
 - [ ] **Labelled arguments** where a call would otherwise be ambiguous, and
   optional arguments with defaults, followed by `()`.
 - [ ] **Stdlib naming**: `t`, `create`/`make`, `of_x`/`to_x`, `*_opt`,
