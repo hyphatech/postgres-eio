@@ -1872,7 +1872,7 @@ let direct_tls () =
         ssl_negotiation = Direct;
       }
   in
-  Alcotest.(check bool) "54.2.11 TLS from the first byte" true (tls_in_use t);
+  Alcotest.(check bool) "54.2.10 TLS from the first byte" true (tls_in_use t);
   cancelled env t;
   Pg.close t
 
@@ -3348,7 +3348,7 @@ let connection_cases =
       `Quick a_required_binding_refuses_a_server_without_one;
     Alcotest.test_case "require_auth refuses what it does not allow" `Quick
       require_auth_refuses_what_it_does_not_allow;
-    Alcotest.test_case "54.2.11 direct TLS" `Quick direct_tls;
+    Alcotest.test_case "54.2.10 direct TLS" `Quick direct_tls;
     Alcotest.test_case "54.2.10 prefer falls back, require never" `Quick
       prefer_falls_back;
     Alcotest.test_case "a client certificate" `Quick a_client_certificate;
