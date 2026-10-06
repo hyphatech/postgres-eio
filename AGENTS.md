@@ -65,14 +65,18 @@ Each rule comes with why it exists and the test that catches a break.
   shared by every borrower. Tests: `a borrower's session is not the next
   one's`, `a transaction left open is rolled back`.
 - **Only a `Listener` keeps notifications; a pooled connection never
-  listens.** The reset runs `UNLISTEN *`. Why: a notification belongs to the
-  session that asked for it, not to whoever borrows the connection next.
+  listens.** Every give-back sends `UNLISTEN *`, with `~reset:false` too.
+  Why: a notification belongs to the session that asked for it, not to
+  whoever borrows the connection next, and an idle pooled connection reads
+  nothing, so one left listening fills the server's notification queue.
+  Test: `a pooled connection never listens`.
 - **No secret reaches a log or a driver error**: no parameter, password,
   SCRAM exchange or message bytes, at any level. The exception is a server
   error's message, returned as the server wrote it, which can quote a value
   that failed its cast (class 22). The TLS library's own `tls.tracing` and
-  `handshake` sources are the application's to cap. Test: `no secret in the
-  log`.
+  `handshake` sources are the application's to cap. Tests: `no secret in
+  the log`, `a bad escape in a password is not quoted`, `a delimiter in a
+  password is not quoted`.
 - **The driver's own failures are values; only the caller's exceptions
   pass through.** Failures inside an exchange raise `Fail` internally and
   are caught where the exchange began. An exception from a caller's
@@ -80,7 +84,8 @@ Each rule comes with why it exists and the test that catches a break.
   as they came. A failure that leaves the stream out of step (timeout,
   broken socket, malformed bytes, a raise from a row function) closes the
   connection. A server error does not, since the server marks where its
-  reply ends.
+  reply ends. Tests: `54.2.3 a server's error keeps the connection`,
+  `54.2.6 a producer that raises is a CopyFail`.
 
 <!-- hypha-ocaml: begin. Every Hypha OCaml repository carries this text word for word; a change to it is made to every copy together. -->
 ## House style

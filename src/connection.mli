@@ -214,12 +214,12 @@ val closed : t -> bool
 val statement_cache : t -> int
 (** The cache size it was made with; [0] means no [binary] results. *)
 
-val timeout : t -> float option
-(** The current timeout; [None] waits forever. *)
+val timeout_s : t -> float option
+(** The current timeout, in seconds; [None] waits forever. *)
 
-val set_timeout : t -> float option -> unit
-(** For long work like a migration. A pool restores the original timeout on
-    return. *)
+val set_timeout : t -> timeout_s:float option -> unit
+(** For long work like a migration: [set_timeout conn ~timeout_s:None]. A pool
+    restores the original timeout on return. *)
 
 val abandon : t -> (unit, error) result
 (** From another fiber, cancels the running statement and refuses later ones

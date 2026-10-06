@@ -3,10 +3,10 @@
     All connections are made by {!create}, so a refused connection fails at
     startup rather than in the middle of a request.
 
-    Every lend is clean: no open transaction, none of a previous borrower's
-    session state (settings, temporary tables, cursors, advisory locks,
-    [LISTEN]), and the original timeout. Use a {!Postgres_eio.Listener} for
-    notifications. *)
+    Every lend is clean: no open transaction, no [LISTEN], the original timeout,
+    and by default none of a previous borrower's session state (settings,
+    temporary tables, cursors, advisory locks). Use a {!Postgres_eio.Listener}
+    for notifications. *)
 
 type t
 
@@ -34,8 +34,9 @@ val create :
     [close all], [unlisten *] except on a standby, [reset all], [discard temp],
     [discard sequences]). The next lend reads its answer, usually already
     arrived, and replaces the connection if the session died meanwhile.
-    [~reset:false] keeps session state; an open transaction is rolled back
-    regardless.
+    [~reset:false] keeps session state, except that an open transaction is
+    rolled back and [LISTEN] ended regardless: a pooled connection never
+    listens.
 
     A daemon fiber on [sw] checks idle connections a few times per
     [min idle_check_s max_lifetime_s]. Connections past [max_lifetime_s] (1800,
@@ -44,8 +45,7 @@ val create :
     while another is idle, and replaced if it fails. Borrowed connections are
     never touched. *)
 
-val use :
-  ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy of float ]) result
+val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy ]) result
 (** Borrows a connection, runs [f] on the calling fiber, and returns it, even if
     [f] raises. [`Busy] if none came free within the wait.
 

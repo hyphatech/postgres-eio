@@ -46,6 +46,15 @@ let binary oid =
 
 let is (c : Column.t) oid = Int.equal (Oid.to_int c.type_oid) oid
 
+(* A text cell is read only where its binary form would be, so text and
+   binary give the same answer. A type always sent as text ([numeric], a
+   domain) has no binary answer to match, and is read as its text says. *)
+let readable (c : Column.t) oids =
+  (not (binary c.type_oid)) || List.exists (is c) oids
+
+let in_text c oids decode s = if readable c oids then decode s else None
+let integers = [ int2_oid; int4_oid; int8_oid; oid_oid ]
+
 (* Postgres's epoch, 2000-01-01, relative to Unix's; and years 1 to 9999,
    the range the text forms read, in days. *)
 let epoch_days = 10957
@@ -56,7 +65,7 @@ let us_per_day = 86_400_000_000
 
 let bool (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_bool s
+  | Column.Text -> in_text c [ bool_oid ] Text.to_bool s
   | Column.Binary -> (
       if not (is c bool_oid && String.length s = 1) then None
       else
@@ -75,7 +84,7 @@ let int_of_int64 v =
 
 let int (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_int s
+  | Column.Text -> in_text c integers Text.to_int s
   | Column.Binary -> (
       match String.length s with
       | 2 when is c int2_oid -> Some (String.get_int16_be s 0)
@@ -87,7 +96,7 @@ let int (c : Column.t) s =
 
 let int64 (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_int64 s
+  | Column.Text -> in_text c integers Text.to_int64 s
   | Column.Binary -> (
       match String.length s with
       | 2 when is c int2_oid -> Some (Int64.of_int (String.get_int16_be s 0))
@@ -104,7 +113,7 @@ let int64 (c : Column.t) s =
    them; microseconds past OCaml's [int] are refused. *)
 let interval (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_interval s
+  | Column.Text -> in_text c [ interval_oid ] Text.to_interval s
   | Column.Binary ->
       if not (is c interval_oid && String.length s = 16) then None
       else
@@ -123,7 +132,7 @@ let single x = Int32.float_of_bits (Int32.bits_of_float x)
 let float (c : Column.t) s =
   match c.format with
   | Column.Text ->
-      let v = Text.to_float s in
+      let v = in_text c [ float4_oid; float8_oid ] Text.to_float s in
       if is c float4_oid then Option.map single v else v
   | Column.Binary -> (
       match String.length s with
@@ -179,19 +188,19 @@ let bytea_of_text s =
 
 let bytes (c : Column.t) s =
   match c.format with
-  | Column.Text -> bytea_of_text s
+  | Column.Text -> in_text c [ bytea_oid ] bytea_of_text s
   | Column.Binary -> if is c bytea_oid then Some s else None
 
 let uuid (c : Column.t) s =
   match c.format with
-  | Column.Text -> Uuidm.of_string s
+  | Column.Text -> in_text c [ uuid_oid ] Uuidm.of_string s
   | Column.Binary ->
       if is c uuid_oid && String.length s = 16 then Uuidm.of_binary_string s
       else None
 
 let date (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_date s
+  | Column.Text -> in_text c [ date_oid ] Text.to_date s
   | Column.Binary ->
       if not (is c date_oid && String.length s = 4) then None
       else
@@ -200,32 +209,33 @@ let date (c : Column.t) s =
           Instant.date_of_days days
         else None
 
-(* [infinity] and [-infinity] are the int64 extremes; values outside years
-   1 to 9999 are refused, as in text. *)
+(* Years 1 to 9999 are read, as in text, and the rest refused, [infinity]
+   and [-infinity] (the int64 extremes) among them. The bounds are checked
+   on the int64: one past OCaml's [int] would wrap into range. *)
+let first_us = Int64.of_int ((first_day * us_per_day) - epoch_us)
+let past_last_us = Int64.of_int ((past_last_day * us_per_day) - epoch_us)
+
 let microseconds (c : Column.t) oid s =
   if not (is c oid && String.length s = 8) then None
   else
     let v = String.get_int64_be s 0 in
-    if Int64.equal v Int64.max_int || Int64.equal v Int64.min_int then None
-    else
-      let us = Int64.to_int v + epoch_us in
-      if us >= first_day * us_per_day && us < past_last_day * us_per_day then
-        Instant.of_us us
-      else None
+    if Int64.compare v first_us >= 0 && Int64.compare v past_last_us < 0 then
+      Instant.of_us (Int64.to_int v + epoch_us)
+    else None
 
 let timestamp (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_timestamptz s
+  | Column.Text -> in_text c [ timestamp_oid ] Text.to_timestamptz s
   | Column.Binary -> microseconds c timestamp_oid s
 
 let timestamptz (c : Column.t) s =
   match c.format with
-  | Column.Text -> Text.to_timestamptz s
+  | Column.Text -> in_text c [ timestamptz_oid ] Text.to_timestamptz s
   | Column.Binary -> microseconds c timestamptz_oid s
 
 let json (c : Column.t) s =
   match c.format with
-  | Column.Text -> Some s
+  | Column.Text -> in_text c [ json_oid; jsonb_oid ] Option.some s
   | Column.Binary ->
       if is c json_oid then Some s
       else if is c jsonb_oid && String.length s >= 1 && Char.equal s.[0] '\001'

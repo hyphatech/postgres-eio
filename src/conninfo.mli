@@ -86,7 +86,8 @@ type t = {
   channel_binding : channel_binding;
   require_auth : auth_methods;
   connect_timeout_s : float option;
-      (** per address attempt; unbounded when absent or not positive *)
+      (** per address attempt; when absent or not positive, the connection's
+          [timeout_s] bounds each attempt instead *)
   application_name : string option;
   keepalives : bool;  (** TCP keepalive, unless [keepalives=0] *)
   target_session_attrs : session_attrs;

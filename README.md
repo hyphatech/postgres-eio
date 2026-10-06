@@ -79,7 +79,7 @@ ignored.
 | `sslnegotiation` | `postgres`, or `direct` for TLS from the first byte (needs `require` or stronger) | `postgres` |
 | `channel_binding` | `disable`, `prefer`, `require` | `prefer` |
 | `require_auth` | list of `password`, `md5`, `scram-sha-256`, `none`, or each negated with `!` | all |
-| `connect_timeout` | seconds per address attempt | none |
+| `connect_timeout` | seconds per address attempt | the connection's `timeout_s` (30) |
 | `application_name` | | |
 | `keepalives` | `1`, `0` | `1` |
 | `target_session_attrs` | `any`, `read-write`, `read-only`, `primary`, `standby`, `prefer-standby` | `any` |

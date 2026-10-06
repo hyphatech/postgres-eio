@@ -48,8 +48,9 @@ val to_date : string -> Ptime.date option
     not one are [None]. *)
 
 val to_timestamptz : string -> Ptime.t option
-(** [DateStyle=ISO] output, in any time zone. BC dates, years past 9999,
-    [infinity] and a time that is not one are [None]. *)
+(** [DateStyle=ISO] output, in any time zone, or what {!timestamptz} and
+    {!timestamp} write. BC dates, years past 9999, [infinity] and a time that is
+    not one are [None]. *)
 
 val interval : Interval.t -> string
 (** As ISO 8601 with designators ([P14M3DT-0H-1.500000S]), which the server

@@ -756,10 +756,50 @@ let conninfo_cases =
           (read "host=db user=app dbname=go password=given"));
     refuses "no user" "postgres://db/go" "no user";
     refuses "a port that is not one" "postgres://app@db:99999/go" "not a port";
+    refuses "a port in hex" "user=app port=0x1538" "not a port";
+    refuses "a connect_timeout in hex" "user=app connect_timeout=0x10"
+      "not a number of seconds";
     refuses "an sslmode that is none of them" "user=app sslmode=maybe" "sslmode";
     refuses "an unterminated quote" "user=app password='open" "closing quote";
     refuses "a key with no =" "user=app dbname" "no =";
     refuses "a bad percent escape" "postgres://app@db/g%zz" "not hex";
+    (* No secret reaches a driver error: the part is named, never quoted. *)
+    Alcotest.test_case "a bad escape in a password is not quoted" `Quick
+      (fun () ->
+        List.iter
+          (fun s ->
+            match Conninfo.of_string s with
+            | Error e ->
+                Alcotest.(check bool)
+                  ("names the password: " ^ e)
+                  true (contains e "password");
+                Alcotest.(check bool)
+                  ("quotes no secret: " ^ e) false (contains e "s3cr3t")
+            | Ok _ -> Alcotest.failf "read %s" s)
+          [
+            "postgres://app:s3cr3t%zz@db/go";
+            "postgres://app:s3cr3t%4@db/go";
+            "postgres://app@db/go?password=s3cr3t%g1";
+          ]);
+    (* A password holding an unescaped URL delimiter splits the URL there,
+       and the error must not quote the piece after it. *)
+    Alcotest.test_case "a delimiter in a password is not quoted" `Quick
+      (fun () ->
+        List.iter
+          (fun s ->
+            match Conninfo.of_string s with
+            | Error e ->
+                Alcotest.(check bool)
+                  ("quotes no secret: " ^ e) false
+                  (contains e "ab12" || contains e "cd34")
+            | Ok _ -> ())
+          [
+            "postgres://app:ab12?cd34@db/go";
+            "postgres://app:ab12/cd34@db/go";
+            "postgres://app:ab12/cd34@db/go?user=app";
+            "postgres://app:ab12#cd34@db/go";
+            "postgres://app:ab12&cd34@db/go";
+          ]);
     refuses "another scheme" "mysql://app@db/go" "postgres://";
   ]
 
@@ -867,6 +907,8 @@ let instants =
     ("a BC date", "0044-03-15 12:00:00+00 BC", None);
     ("a year past 9999", "10000-01-01 00:00:00+00", None);
     ("infinity", "infinity", None);
+    ("as the driver writes it", "2026-09-27T10:00:00.000000Z", Some ten);
+    ("a Z with more after it", "2026-09-27T10:00:00Z+01", None);
     ("not a date", "2026-02-30 10:00:00+00", None);
     ("not a time", "2026-09-27 24:00:00+00", None);
   ]
@@ -974,6 +1016,59 @@ let an_oid_is_four_unsigned_bytes () =
     "not to another" false
     (Postgres_eio.Oid.equal (oid 23) (oid 25))
 
+(* 54.8: each field by its code; a missing message is empty, a missing
+   detail or hint absent. *)
+let a_server_errors_fields () =
+  let module E = Postgres_eio.Server_error in
+  let e =
+    E.of_fields
+      [
+        ('S', "ERROR");
+        ('C', "23505");
+        ('M', "duplicate key");
+        ('D', "Key (id)=(1) exists.");
+        ('H', "Pick another.");
+        ('n', "t_pkey");
+      ]
+  in
+  Alcotest.(check string) "message" "duplicate key" (E.message e);
+  Alcotest.(check (option string))
+    "detail" (Some "Key (id)=(1) exists.") (E.detail e);
+  Alcotest.(check (option string)) "hint" (Some "Pick another.") (E.hint e);
+  Alcotest.(check (option string))
+    "constraint" (Some "t_pkey") (E.constraint_name e);
+  Alcotest.(check string)
+    "its sentence, without the detail" "ERROR 23505: duplicate key"
+    (E.to_string e);
+  let bare = E.of_fields [] in
+  Alcotest.(check string) "no message" "" (E.message bare);
+  Alcotest.(check (option string)) "no detail" None (E.detail bare)
+
+(* 54.7 CommandComplete: a count where the command has one, and a tag not
+   known kept whole. *)
+let a_command_tag () =
+  List.iter
+    (fun (tag, command, rows) ->
+      let t = Postgres_eio.Tag.of_string tag in
+      Alcotest.(check (pair string (option int)))
+        tag (command, rows)
+        (Postgres_eio.Tag.command t, Postgres_eio.Tag.rows t))
+    [
+      ("INSERT 0 3", "INSERT", Some 3);
+      ("SELECT 5", "SELECT", Some 5);
+      ("UPDATE 0", "UPDATE", Some 0);
+      ("DELETE 2", "DELETE", Some 2);
+      ("MERGE 4", "MERGE", Some 4);
+      ("FETCH 1", "FETCH", Some 1);
+      ("MOVE 6", "MOVE", Some 6);
+      ("COPY 7", "COPY", Some 7);
+      ("CREATE TABLE", "CREATE TABLE", None);
+      ("COMMIT", "COMMIT", None);
+      ("SELECT many", "SELECT", None);
+      ("INSERT 0", "INSERT 0", None);
+      ("", "", None);
+    ]
+
 (* V is never localised, so it decides; S stands in only without it. *)
 let a_severity_by_its_unlocalised_name () =
   let module E = Postgres_eio.Server_error in
@@ -1030,6 +1125,142 @@ let a_date_reads_back =
             (fun (y, m, d) (y', m', d') -> y = y' && m = m' && d = d')
             (Text.to_date (Text.date date))
             (Some date))
+
+(* Every microsecond of years 1 to 9999, as either writer gives it. *)
+let an_instant_reads_back =
+  QCheck2.Test.make ~count:1000 ~print:string_of_int
+    ~name:"an instant written reads back as itself"
+    QCheck2.Gen.(int_range (-62_135_596_800_000_000) 253_402_300_799_999_999)
+    (fun us ->
+      let t = instant_of_us us in
+      List.for_all
+        (fun write ->
+          Option.equal Int.equal
+            (Option.map us_of (Text.to_timestamptz (write t)))
+            (Some us))
+        [ Text.timestamptz; Text.timestamp ])
+
+(* A decoder gives a cell's type the same answer whether the cell came as
+   text or binary; a type always sent as text is read as its text says. *)
+let a_decoder_answers_alike_both_ways () =
+  let column type_oid format =
+    { Postgres_eio.Column.name = "c"; type_oid = oid type_oid; format }
+  in
+  let both what decode ~oid ~text ~binary =
+    Alcotest.(check (pair bool bool))
+      what (false, false)
+      ( Option.is_some (decode (column oid Text) text),
+        Option.is_some (decode (column oid Binary) binary) )
+  in
+  let module V = Postgres_eio.Value in
+  both "bool of a text" V.bool ~oid:25 ~text:"t" ~binary:"t";
+  both "int of a text" V.int ~oid:25 ~text:"42" ~binary:"42";
+  both "int64 of a text" V.int64 ~oid:25 ~text:"42" ~binary:"42";
+  both "float of an int4" V.float ~oid:23 ~text:"42" ~binary:"\000\000\000*";
+  both "json of a text" V.json ~oid:25 ~text:"{}" ~binary:"{}";
+  both "bytes of a text" V.bytes ~oid:25 ~text:"ab" ~binary:"ab";
+  both "uuid of a text" V.uuid ~oid:25
+    ~text:"0190c0fe-1234-7abc-8def-0123456789ab"
+    ~binary:"0190c0fe-1234-7abc-8def-0123456789ab";
+  both "date of a text" V.date ~oid:25 ~text:"2026-09-27" ~binary:"2026-09-27";
+  both "timestamp of a timestamptz" V.timestamp ~oid:1184
+    ~text:"2026-01-01 00:00:00+00" ~binary:"\000\002\234\021\000\000\000\000";
+  both "timestamptz of a timestamp" V.timestamptz ~oid:1114
+    ~text:"2026-01-01 00:00:00" ~binary:"\000\002\234\021\000\000\000\000";
+  both "interval of a text" V.interval ~oid:25 ~text:"1 day" ~binary:"1 day";
+  Alcotest.(check (option int))
+    "but a numeric, always text, is read" (Some 42)
+    (V.int (column 1700 Text) "42");
+  Alcotest.(check (option (float 0.)))
+    "as a float too" (Some 1.5)
+    (V.float (column 1700 Text) "1.5")
+
+(* Decimal only, as Postgres writes a number: OCaml's own literals are
+   refused, a hex one past the range above all, which would wrap. *)
+let a_number_is_decimal () =
+  let ints =
+    [
+      ("42", Some 42);
+      ("-7", Some (-7));
+      ("+5", Some 5);
+      ("007", Some 7);
+      ("0x10", None);
+      ("0o7", None);
+      ("0b11", None);
+      ("0u5", None);
+      ("1_000", None);
+      ("0x7fffffffffffffff", None);
+      ("", None);
+      ("-", None);
+      (" 1", None);
+    ]
+  in
+  List.iter
+    (fun (s, expected) ->
+      Alcotest.(check (option int)) ("int " ^ s) expected (Text.to_int s);
+      Alcotest.(check (option int64))
+        ("int64 " ^ s)
+        (Option.map Int64.of_int expected)
+        (Text.to_int64 s))
+    ints;
+  Alcotest.(check (option int64))
+    "int64 past its range in hex" None
+    (Text.to_int64 "0xffffffffffffffff");
+  List.iter
+    (fun (s, expected) ->
+      Alcotest.(check (option (float 0.)))
+        ("float " ^ s) expected (Text.to_float s))
+    [
+      ("1.5", Some 1.5);
+      ("-0.25", Some (-0.25));
+      ("1e+100", Some 1e100);
+      ("1.5e-07", Some 1.5e-07);
+      ("3", Some 3.);
+      ("Infinity", Some Float.infinity);
+      ("0x1p3", None);
+      ("1_0.5", None);
+      ("nan", None);
+      ("inf", None);
+      ("1e", None);
+      (".", None);
+      ("", None);
+    ]
+
+(* A binary timestamp is microseconds since 2000-01-01 as an int8: within
+   years 1 to 9999, the years text reads, it is that instant; past them,
+   however far, it is refused, never wrapped back into range. The bounds
+   are 0001-01-01 and 10000-01-01, in seconds since 2000-01-01. *)
+let a_binary_instant_reads_as_itself =
+  let first = Int64.mul (-63_082_281_600L) 1_000_000L in
+  let past = Int64.mul 252_455_616_000L 1_000_000L in
+  let unix_us_of_2000 = 946_684_800_000_000 in
+  let column =
+    { Postgres_eio.Column.name = "t"; type_oid = oid 1114; format = Binary }
+  in
+  QCheck2.Test.make ~count:1000 ~print:Int64.to_string
+    ~name:"a binary instant reads as itself, or not at all"
+    QCheck2.Gen.(
+      oneof
+        [
+          int64;
+          map Int64.of_int
+            (int_range (-63_100_000_000_000_000) 252_500_000_000_000_000);
+          (* Past OCaml's int, where a conversion would wrap. *)
+          map
+            (fun d -> Int64.sub Int64.max_int (Int64.of_int d))
+            (int_range 0 Int.max_int);
+        ])
+    (fun v ->
+      let cell = Bytes.create 8 in
+      Bytes.set_int64_be cell 0 v;
+      let expected =
+        if Int64.compare v first >= 0 && Int64.compare v past < 0 then
+          Some (Int64.to_int v + unix_us_of_2000)
+        else None
+      in
+      Option.equal Int.equal expected
+        (Option.map us_of
+           (Postgres_eio.Value.timestamp column (Bytes.to_string cell))))
 
 (* Against a real server, named by POSTGRES_EIO_TEST_PG (see compose.yaml).
    Skipped when unset. *)
@@ -1452,7 +1683,7 @@ let a_silent_server_times_out () =
 let a_read_past_the_timeout () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
-  Pg.set_timeout t (Some 0.3);
+  Pg.set_timeout t ~timeout_s:(Some 0.3);
   Alcotest.(check bool)
     "a timeout" true
     (match
@@ -1463,7 +1694,7 @@ let a_read_past_the_timeout () =
   Alcotest.(check bool)
     "and the connection closed, out of step" true (Pg.closed t);
   ok_pg (Pg.reset t);
-  Pg.set_timeout t None;
+  Pg.set_timeout t ~timeout_s:None;
   Alcotest.(check string)
     "lifted, a long statement runs" ""
     (one t "select pg_sleep(0.5)::text" []);
@@ -2425,9 +2656,9 @@ let a_silent_network_is_found () =
   Pg.Listener.close l;
   Pg.close n
 
-(* Regression: a listener survives several silent heartbeats, over TLS
-   too. A heartbeat used to cancel a TLS read, which tls-eio then re-raised
-   on the next write. *)
+(* A listener survives several silent heartbeats, over TLS too: a
+   heartbeat must not cancel a TLS read, which tls-eio would re-raise on the
+   next write. *)
 let a_quiet_listener_outlives_its_heartbeats () =
   with_eio @@ fun env sw ->
   List.iter
@@ -3127,6 +3358,24 @@ let binary_values_are_the_values () =
   Alcotest.(check (option int)) "an int8 past an int" None (Value.int c s);
   Alcotest.(check (option string))
     "but its text" (Some "9223372036854775807") (Value.text c s);
+  List.iter
+    (fun (sql, expected) ->
+      let c, s = one_binary sql in
+      Alcotest.(check (option int))
+        sql expected
+        (Option.map us_of
+           (match Pg.Oid.to_int c.type_oid with
+           | 1184 -> Value.timestamptz c s
+           | _ -> Value.timestamp c s)))
+    [
+      ("select '0001-01-01 00:00'::timestamp", Some (-62_135_596_800_000_000));
+      ( "select '9999-12-31 23:59:59.999999'::timestamp",
+        Some 253_402_300_799_999_999 );
+      ("select '10000-01-01 00:00'::timestamp", None);
+      ("select '294000-06-01 00:00'::timestamp", None);
+      ("select 'infinity'::timestamptz", None);
+      ("select '-infinity'::timestamptz", None);
+    ];
   let c, s = one_binary "select 'x'::char(3)" in
   Alcotest.(check bool)
     "a type not read here comes as text" true
@@ -3435,6 +3684,155 @@ let a_name_tls_cannot_carry () =
   | Error e -> Alcotest.failf "not refused here: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to a name it could not check"
 
+(* 54.2.9: close sends Terminate, and nothing after it. *)
+let a_close_sends_terminate () =
+  with_eio @@ fun env sw ->
+  let port, heard, closed =
+    a_fake_server env sw ~answer:(Some (msg 'R' (int32 0) ^ msg 'Z' "I"))
+  in
+  let t = connect env sw (at ~port (Tcp "127.0.0.1") (plain ())) in
+  Pg.close t;
+  Eio.Promise.await closed;
+  Alcotest.(check string)
+    "a Terminate, then the socket closed"
+    (hex (msg 'X' ""))
+    (hex (Buffer.contents heard))
+
+(* 54.2.4: drain reads every answer, so the status is current, and leaves a
+   statement's error in its answer; flush sends without reading. *)
+let drain_and_flush () =
+  with_eio @@ fun env sw ->
+  let t = connect_cached env sw (plain ()) in
+  let q sql = Pg.Pipeline.query t sql ~params:[] ~init:[] ~row:one_value in
+  let failed = q "select 1/0" in
+  ignore (q "begin");
+  Alcotest.(check bool)
+    "not read yet" true
+    (match Pg.status t with P.Idle -> true | _ -> false);
+  Alcotest.(check (result unit string))
+    "drained" (Ok ())
+    (Result.map_error Pg.error_to_string (Pg.Pipeline.drain t));
+  Alcotest.(check bool)
+    "the status current" true
+    (match Pg.status t with P.In_transaction -> true | _ -> false);
+  Alcotest.(check bool)
+    "the error kept in its answer" true
+    (match Pg.Pipeline.get failed with
+    | Error (Pg.Server _) -> true
+    | _ -> false);
+  script t "rollback";
+  let flushed = q "select 'f'" in
+  Alcotest.(check (result unit string))
+    "flushed" (Ok ())
+    (Result.map_error Pg.error_to_string (Pg.Pipeline.flush t));
+  Alcotest.(check (result (list string) string))
+    "and the next reader gets the answer" (Ok [ "f" ])
+    (answer_int (Pg.Pipeline.get flushed));
+  in_step t;
+  Pg.close t
+
+(* From another fiber, abandon cancels the running statement and refuses
+   the next until resume. *)
+let abandoned_until_resumed () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  let clock = Eio.Stdenv.mono_clock env in
+  let sleep () =
+    Pg.query t "select pg_sleep(5)" ~params:[] ~init:() ~row:(fun () _ -> ())
+  in
+  let running = ref (Ok ((), Pg.Tag.empty)) in
+  Eio.Fiber.both
+    (fun () -> running := sleep ())
+    (fun () ->
+      Eio.Time.Mono.sleep clock 0.2;
+      ignore (ok_pg (Pg.abandon t)));
+  Alcotest.(check (option string))
+    "the running one cancelled" (Some "57014")
+    (match !running with
+    | Error (Pg.Server e) -> Some (Pg.Server_error.sqlstate e)
+    | _ -> None);
+  Alcotest.(check bool)
+    "the next refused" true
+    (match Pg.script t "select 1" with
+    | Error (Pg.Refused _) -> true
+    | _ -> false);
+  Pg.resume t;
+  Alcotest.(check string) "and taken after resume" "1" (one t "select 1" []);
+  Pg.close t
+
+(* Any text, NULLs among it, goes in by COPY and comes back as it went,
+   against the escaping a hand-picked list could miss. *)
+let any_rows_through_copy () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  script t "create temp table r (n int, s text)";
+  let alphabet =
+    [
+      'a';
+      'N';
+      'n';
+      't';
+      'x';
+      '.';
+      ',';
+      ' ';
+      '\\';
+      '\t';
+      '\n';
+      '\r';
+      '\001';
+      '\'';
+      '"';
+    ]
+  in
+  (* A fixed seed, so a failure names the same rows when run again. *)
+  let cells =
+    QCheck2.Gen.(
+      generate ~n:500
+        ~rand:(Random.State.make [| 26 |])
+        (option (string_size ~gen:(oneof_list alphabet) (int_range 0 12))))
+  in
+  let sent = List.mapi (fun i s -> [ Some (string_of_int i); s ]) cells in
+  ignore
+    (ok_pg
+       (Pg.copy_in_rows t ~table:"r" ~columns:[ "n"; "s" ]
+          (List.to_seq (List.map Array.of_list sent))));
+  let back, _ =
+    ok_pg
+      (Pg.copy_out_rows t ~select:"select n, s from r order by n" ~init:[]
+         ~row:(fun acc cells -> Array.to_list cells :: acc))
+  in
+  Alcotest.(check (list string))
+    "54.2.6 every row as it went" (show_rows sent)
+    (show_rows (List.rev back));
+  Pg.close t
+
+(* Instants across years 1 to 9999, written by the driver, read by the
+   server and printed back in a distant zone. *)
+let generated_instants_bound () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  script t "set timezone = 'Asia/Kolkata'";
+  (* A fixed seed, so a failure names the same instants when run again;
+     a day inside the range, since a distant zone can print year 0. *)
+  let instants =
+    QCheck2.Gen.(
+      generate ~n:300
+        ~rand:(Random.State.make [| 1 |])
+        (int_range (-62_135_510_400_000_000) 253_402_214_399_999_999))
+  in
+  List.iter
+    (fun us ->
+      let printed =
+        one t "select $1::timestamptz"
+          [ Some (Text.timestamptz (instant_of_us us)) ]
+      in
+      Alcotest.(check (option int))
+        printed (Some us)
+        (Option.map us_of (Text.to_timestamptz printed)))
+    instants;
+  Pg.close t
+
 let connection_cases =
   [
     Alcotest.test_case "a query, signed in by SCRAM" `Quick a_query_by_scram;
@@ -3516,6 +3914,16 @@ let connection_cases =
     Alcotest.test_case "54.2.3 a batch is one round trip and one transaction"
       `Quick a_batch;
     Alcotest.test_case "54.2.4 a pipeline" `Quick a_pipeline;
+    Alcotest.test_case "54.2.4 drain reads every answer, flush none" `Quick
+      drain_and_flush;
+    Alcotest.test_case "an abandoned connection refuses until resumed" `Quick
+      abandoned_until_resumed;
+    Alcotest.test_case "54.2.9 a close sends Terminate" `Quick
+      a_close_sends_terminate;
+    Alcotest.test_case "54.2.6 any rows, through COPY and back" `Quick
+      any_rows_through_copy;
+    Alcotest.test_case "instants across the years, bound" `Quick
+      generated_instants_bound;
     Alcotest.test_case "54.2.4 answers asked for out of order" `Quick
       answers_asked_for_out_of_order;
     Alcotest.test_case "54.2.4 a refused Parse down a pipeline" `Quick
@@ -3583,7 +3991,7 @@ let pool ?parameters ?(size = 1) ?(wait_s = 2.) ?reset ?max_lifetime_s
 let borrow p f =
   match Pg.Pool.use p f with
   | Ok v -> v
-  | Error (`Busy _) -> Alcotest.fail "no connection"
+  | Error `Busy -> Alcotest.fail "no connection"
 
 (* An exhausted pool returns [`Busy] within its wait, then recovers. *)
 let a_held_pool_is_busy_then_serves () =
@@ -3596,7 +4004,7 @@ let a_held_pool_is_busy_then_serves () =
     (fun () -> answer := Pg.Pool.use p (fun _ -> ()));
   Alcotest.(check bool)
     "busy while held" true
-    (match !answer with Error (`Busy _) -> true | Ok () -> false);
+    (match !answer with Error `Busy -> true | Ok () -> false);
   Alcotest.(check string)
     "served once free" "1"
     (borrow p (fun t -> one t "select 1" []));
@@ -3775,12 +4183,29 @@ let reset_false_keeps_the_session () =
         (match Pg.status t with P.Idle -> true | _ -> false));
   Pg.Pool.close p
 
+(* Even with [~reset:false]: an idle pooled connection reads nothing, so
+   one left listening would fill the server's notification queue. *)
+let a_pooled_connection_never_listens () =
+  with_eio @@ fun env sw ->
+  let p = pool ~reset:false env sw in
+  borrow p (fun t ->
+      script t "set timezone = 'Asia/Tokyo'";
+      script t "listen pgeio_pooled");
+  borrow p (fun t ->
+      Alcotest.(check string)
+        "not listening" "0"
+        (one t "select count(*)::text from pg_listening_channels()" []);
+      Alcotest.(check string)
+        "though the setting is kept" "Asia/Tokyo" (one t "show timezone" []));
+  Pg.Pool.close p
+
 let the_timeout_it_was_made_with () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
-  borrow p (fun t -> Pg.set_timeout t None);
+  borrow p (fun t -> Pg.set_timeout t ~timeout_s:None);
   borrow p (fun t ->
-      Alcotest.(check (option (float 0.))) "put back" (Some 30.) (Pg.timeout t));
+      Alcotest.(check (option (float 0.)))
+        "put back" (Some 30.) (Pg.timeout_s t));
   Pg.Pool.close p
 
 let backend t = one t "select pg_backend_pid()::text" []
@@ -3867,7 +4292,7 @@ let closing_a_pool_waits_for_its_borrows () =
   Alcotest.(check bool)
     "and none lent after" true
     (match Pg.Pool.use ~wait_s:0.1 p ignore with
-    | Error (`Busy _) -> true
+    | Error `Busy -> true
     | Ok () -> false)
 
 (* After the backend is terminated, the next borrow gets a reconnected
@@ -3902,7 +4327,7 @@ let a_pool_is_borrowed_from_every_domain () =
                match Pg.Pool.use p (fun t -> one t "select 1" []) with
                | Ok "1" -> Atomic.incr served
                | Ok _ -> Alcotest.fail "a wrong answer"
-               | Error (`Busy _) -> Alcotest.fail "a borrow found no connection"
+               | Error `Busy -> Alcotest.fail "a borrow found no connection"
              done)));
   Alcotest.(check int) "every borrow was served" 15 (Atomic.get served);
   Pg.Pool.close p
@@ -3975,7 +4400,7 @@ let a_cancelled_reset_gives_the_connection_back () =
   Eio.Fiber.first
     (fun () ->
       match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
-      | Ok () | Error (`Busy _) -> ())
+      | Ok () | Error `Busy -> ())
     (fun () -> Eio.Time.Mono.sleep clock 0.2);
   answering := true;
   Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);
@@ -4037,6 +4462,8 @@ let pool_cases =
       a_borrowers_session_is_not_the_next_ones;
     Alcotest.test_case "reset false keeps the session" `Quick
       reset_false_keeps_the_session;
+    Alcotest.test_case "a pooled connection never listens" `Quick
+      a_pooled_connection_never_listens;
     Alcotest.test_case "the timeout it was made with" `Quick
       the_timeout_it_was_made_with;
     Alcotest.test_case "a connection past its lifetime" `Quick
@@ -4094,13 +4521,21 @@ let () =
             QCheck_alcotest.to_alcotest an_int_reads_back;
             QCheck_alcotest.to_alcotest bytes_read_back;
             QCheck_alcotest.to_alcotest a_date_reads_back;
+            QCheck_alcotest.to_alcotest a_binary_instant_reads_as_itself;
+            QCheck_alcotest.to_alcotest an_instant_reads_back;
           ] );
       ( "types",
         [
+          Alcotest.test_case "a number is decimal" `Quick a_number_is_decimal;
+          Alcotest.test_case "a decoder answers alike both ways" `Quick
+            a_decoder_answers_alike_both_ways;
           Alcotest.test_case "an OID is four unsigned bytes" `Quick
             an_oid_is_four_unsigned_bytes;
-          Alcotest.test_case "a severity, by its unlocalised name" `Quick
+          Alcotest.test_case "54.8 a severity, by its unlocalised name" `Quick
             a_severity_by_its_unlocalised_name;
+          Alcotest.test_case "54.8 a server error's fields" `Quick
+            a_server_errors_fields;
+          Alcotest.test_case "54.7 a command tag" `Quick a_command_tag;
         ] );
       ( "the connection",
         match target with

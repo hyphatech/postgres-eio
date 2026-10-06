@@ -59,20 +59,22 @@ let entry t conn =
   }
 
 (* DISCARD ALL minus prepared statements and plans, which are the shared
-   cache. A standby refuses UNLISTEN and cannot have listened anyway. *)
+   cache, and minus UNLISTEN, which is sent regardless. *)
 let reset_statements =
   [
     "set session authorization default";
     "select pg_advisory_unlock_all()";
     "close all";
-    "unlisten *";
     "reset all";
     "discard temp";
     "discard sequences";
   ]
 
 (* Sent but not read here: the next lend reads it, usually without waiting.
-   An open transaction is rolled back even with [~reset:false]. *)
+   Even with [~reset:false] an open transaction is rolled back, and a
+   LISTEN ended, since an idle pooled connection reads nothing and would
+   fill the server's notification queue. A standby refuses UNLISTEN and
+   cannot have listened anyway. *)
 let queue_reset t e =
   let conn = e.conn in
   let rollback =
@@ -80,17 +82,13 @@ let queue_reset t e =
     | Protocol.Idle -> []
     | Protocol.In_transaction | Protocol.Failed -> [ "rollback" ]
   in
-  let standby =
-    Option.equal String.equal (C.parameter conn "in_hot_standby") (Some "on")
+  let unlisten =
+    match C.parameter conn "in_hot_standby" with
+    | Some "on" -> []
+    | Some _ | None -> [ "unlisten *" ]
   in
-  let reset =
-    if t.reset then
-      List.filter
-        (fun sql -> not (standby && String.equal sql "unlisten *"))
-        reset_statements
-    else []
-  in
-  match rollback @ reset with
+  let reset = if t.reset then reset_statements else [] in
+  match rollback @ unlisten @ reset with
   | [] -> ()
   | statements ->
       e.resetting <-
@@ -141,7 +139,7 @@ let ready e =
 let give_back t e =
   ignore (C.Pipeline.drain e.conn : (unit, C.error) result);
   C.resume e.conn;
-  C.set_timeout e.conn t.timeout_s;
+  C.set_timeout e.conn ~timeout_s:t.timeout_s;
   if not (C.closed e.conn) then queue_reset t e;
   back t e
 
@@ -254,7 +252,7 @@ let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
           wait_s;
           clock :> Eio.Time.Mono.ty Eio.Resource.t;
           connect;
-          timeout_s = (match all with c :: _ -> C.timeout c | [] -> None);
+          timeout_s = (match all with c :: _ -> C.timeout_s c | [] -> None);
           reset;
           lifetime = span max_lifetime_s;
           idle_check = span idle_check_s;
@@ -329,7 +327,7 @@ let use ?wait_s t f =
   match take t ~wait_s with
   | None ->
       Log.warn (fun m -> m "no connection came free within %gs" wait_s);
-      Error (`Busy wait_s)
+      Error `Busy
   | Some e ->
       let given = now t in
       slow ~what:"a wait for a connection" ~over:wait_warn_ms asked given;

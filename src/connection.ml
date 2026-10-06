@@ -1945,12 +1945,12 @@ let status t = t.status
 let parameter t name = List.assoc_opt name t.settings
 let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache
-let timeout t = t.timeout_s
+let timeout_s t = t.timeout_s
 
 (* Only on change: the pool restores the timeout on every return. *)
-let set_timeout t s =
-  if not (Option.equal Float.equal s t.timeout_s) then begin
-    t.timeout_s <- s;
+let set_timeout t ~timeout_s =
+  if not (Option.equal Float.equal timeout_s t.timeout_s) then begin
+    t.timeout_s <- timeout_s;
     Eio.Condition.broadcast t.changed
   end
 
@@ -2044,7 +2044,7 @@ let notify t ~channel payload =
 
 (* Waits on socket readiness, bounded by [seconds], never on a cancellable
    read: tls-eio stores a cancelled read's exception as the session error
-   and raises it on the next write, which broke every TLS listener at its
+   and raises it on the next write, so a TLS listener would fail at its
    first silence. Once bytes arrive, the read runs under the normal
    timeout. Without a descriptor, a plain socket is read under the bound;
    a TLS one waits unbounded. *)

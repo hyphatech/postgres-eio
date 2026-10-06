@@ -258,7 +258,7 @@ let host_of_string s =
 let port_of_string p =
   if String.equal p "" then Ok 5432
   else
-    match int_of_string_opt p with
+    match Text.to_int p with
     | Some n when n >= 1 && n <= 65535 -> Ok n
     | Some _ | None -> Error (Printf.sprintf "port %S is not a port" p)
 
@@ -408,7 +408,7 @@ let of_pairs pairs =
     match find "connect_timeout" with
     | None -> Ok None
     | Some s -> (
-        match int_of_string_opt s with
+        match Text.to_int s with
         | Some n when n > 0 -> Ok (Some (float_of_int n))
         | Some _ -> Ok None
         | None ->
@@ -474,7 +474,8 @@ let hex c =
   | 'A' .. 'F' -> Some (Char.code c - 55)
   | _ -> None
 
-let percent_decode s =
+(* The error names the part, never quotes it: it may be the password. *)
+let percent_decode what s =
   let b = Buffer.create (String.length s) in
   let rec go i =
     if i >= String.length s then Ok (Buffer.contents b)
@@ -482,7 +483,7 @@ let percent_decode s =
       match s.[i] with
       | '%' -> (
           if i + 2 >= String.length s then
-            Error (Printf.sprintf "%S ends inside a percent escape" s)
+            Error (Printf.sprintf "%s ends inside a percent escape" what)
           else
             match (hex s.[i + 1], hex s.[i + 2]) with
             | Some h, Some l ->
@@ -490,7 +491,8 @@ let percent_decode s =
                 go (i + 3)
             | _ ->
                 Error
-                  (Printf.sprintf "%S has a percent escape that is not hex" s))
+                  (Printf.sprintf "%s has a percent escape that is not hex" what)
+          )
       | c ->
           Buffer.add_char b c;
           go (i + 1)
@@ -509,6 +511,15 @@ let rsplit_once c s =
       (String.sub s 0 i, Some (String.sub s (i + 1) (String.length s - i - 1)))
   | None -> (s, None)
 
+(* Checked here, not quoted: a password holding an unescaped / ends the
+   authority inside the password, whose piece lands where the port is. *)
+let url_port p =
+  if String.for_all (function '0' .. '9' -> true | _ -> false) p then Ok p
+  else
+    Error
+      "the URL's port is not a number, or a password holds an unescaped /, \
+       which is written %2F"
+
 (* host[:port]; IPv6 in brackets, a socket directory percent-encoded. *)
 let one_authority hostspec =
   if String.length hostspec > 0 && Char.equal hostspec.[0] '[' then
@@ -519,12 +530,14 @@ let one_authority hostspec =
         match String.sub hostspec (j + 1) (String.length hostspec - j - 1) with
         | "" -> Ok (host, "")
         | rest when Char.equal rest.[0] ':' ->
-            Ok (host, String.sub rest 1 (String.length rest - 1))
+            let* port = url_port (String.sub rest 1 (String.length rest - 1)) in
+            Ok (host, port)
         | _ -> Error "an IPv6 host followed by something other than a port")
   else
     let host, port = rsplit_once ':' hostspec in
-    let* host = percent_decode host in
-    Ok (host, Option.value port ~default:"")
+    let* host = percent_decode "the URL's host" host in
+    let* port = url_port (Option.value port ~default:"") in
+    Ok (host, port)
 
 (* Hosts without a port get the default. *)
 let authority hostspec =
@@ -567,11 +580,11 @@ let pairs_of_url s =
     | None -> Ok []
     | Some u -> (
         let user, password = split_once ':' u in
-        let* user = percent_decode user in
+        let* user = percent_decode "the URL's user" user in
         match password with
         | None -> Ok [ ("user", user) ]
         | Some p ->
-            let* p = percent_decode p in
+            let* p = percent_decode "the URL's password" p in
             Ok [ ("user", user); ("password", p) ])
   in
   let* host = authority hostspec in
@@ -579,7 +592,7 @@ let pairs_of_url s =
     match path with
     | None | Some "" -> Ok []
     | Some d ->
-        let* d = percent_decode d in
+        let* d = percent_decode "the URL's database" d in
         Ok [ ("dbname", d) ]
   in
   let* params =
@@ -591,10 +604,18 @@ let pairs_of_url s =
             let* acc = acc in
             match split_once '=' pair with
             | k, Some v ->
-                let* k = percent_decode k in
-                let* v = percent_decode v in
+                let* k = percent_decode "a URL parameter's name" k in
+                let* v = percent_decode (Printf.sprintf "the URL's %s" k) v in
                 Ok ((k, v) :: acc)
-            | k, None -> Error (Printf.sprintf "the URL's %S has no value" k))
+            | k, None ->
+                (* Only a key is quoted: a password holding an unescaped ?
+                   puts its rest here. *)
+                Error
+                  (if List.mem k keys then
+                     Printf.sprintf "the URL's %s has no value" k
+                   else
+                     "a URL parameter has no value, or a password holds an \
+                      unescaped ?, which is written %3F"))
           (Ok [])
           (List.filter
              (fun p -> not (String.equal p ""))

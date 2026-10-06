@@ -1,8 +1,8 @@
 (** Cell decoders that give the same value for text and binary results.
 
-    Each returns [None] for a cell of another type or an unreadable form. Binary
-    forms are Postgres's send functions, unchanged since Postgres 10 for these
-    types.
+    Each returns [None] for a cell of another type or an unreadable form, in
+    text as in binary. Binary forms are Postgres's send functions, unchanged
+    since Postgres 10 for these types.
 
     Text [float4] is rounded to single precision so it matches binary, given
     [extra_float_digits >= 1] (the default since Postgres 12). Text dates and
@@ -10,8 +10,9 @@
     10000 may print, in a distant time zone, as a year no decoder reads.
 
     A type with no reader here -- [numeric], [time], a range, [inet] -- is
-    always sent as text, since {!binary} asks for no other, and {!text} hands it
-    over as the server printed it. *)
+    always sent as text, since {!binary} asks for no other. {!text} hands it
+    over as the server printed it, and a decoder reads it if its text is that
+    decoder's form: {!int} reads a [numeric] of [42]. *)
 
 val binary : Oid.t -> bool
 (** Whether this module decodes the type's binary form: [bool], [bytea], [int8],
@@ -28,14 +29,14 @@ val bool : Column.t -> string -> bool option
 (** [bool]'s [t] and [f], or its byte. *)
 
 val int : Column.t -> string -> int option
-(** [int2], [int4], [int8], [oid], or any integer in text; [None] if it exceeds
-    OCaml's [int]. *)
+(** [int2], [int4], [int8], [oid], or an integer in a type always sent as text;
+    [None] if it exceeds OCaml's [int]. *)
 
 val int64 : Column.t -> string -> int64 option
 (** As {!int}, the whole of an [int8]'s range. *)
 
 val float : Column.t -> string -> float option
-(** [float4] and [float8], and any number in text. *)
+(** [float4] and [float8], or a number in a type always sent as text. *)
 
 val bytes : Column.t -> string -> string option
 (** [bytea]'s bytes: in text, the hex form or the escape form. *)

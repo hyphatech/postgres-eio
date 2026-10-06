@@ -1,7 +1,17 @@
+let is_digit = function '0' .. '9' -> true | _ -> false
+
+(* Checked before the stdlib's parsers, which also read OCaml's literals:
+   [0x], [0o], [0b], [0u] and [_], and a hex one past the range wraps. *)
+let decimal s =
+  let n = String.length s in
+  let sign = n > 0 && (Char.equal s.[0] '-' || Char.equal s.[0] '+') in
+  let start = if sign then 1 else 0 in
+  n > start && String.for_all is_digit (String.sub s start (n - start))
+
 let int = string_of_int
-let to_int = int_of_string_opt
+let to_int s = if decimal s then int_of_string_opt s else None
 let int64 = Int64.to_string
-let to_int64 = Int64.of_string_opt
+let to_int64 s = if decimal s then Int64.of_string_opt s else None
 
 (* 17 significant digits round-trip a double exactly. *)
 let float f =
@@ -10,11 +20,36 @@ let float f =
   else if Float.equal f Float.neg_infinity then "-Infinity"
   else Printf.sprintf "%.17g" f
 
+(* [-1.5e+07]: a sign, digits with at most one point, and an exponent. *)
+let decimal_float s =
+  let n = String.length s in
+  let rec digits i seen =
+    if i < n && is_digit s.[i] then digits (i + 1) true else (i, seen)
+  in
+  let start =
+    if n > 0 && (Char.equal s.[0] '-' || Char.equal s.[0] '+') then 1 else 0
+  in
+  let i, whole = digits start false in
+  let i, fraction =
+    if i < n && Char.equal s.[i] '.' then digits (i + 1) false else (i, false)
+  in
+  let exponent i =
+    let i =
+      if i < n && (Char.equal s.[i] '-' || Char.equal s.[i] '+') then i + 1
+      else i
+    in
+    let i, seen = digits i false in
+    seen && i = n
+  in
+  (whole || fraction)
+  && (i = n
+     || ((Char.equal s.[i] 'e' || Char.equal s.[i] 'E') && exponent (i + 1)))
+
 let to_float = function
   | "NaN" -> Some Float.nan
   | "Infinity" -> Some Float.infinity
   | "-Infinity" -> Some Float.neg_infinity
-  | s -> float_of_string_opt s
+  | s -> if decimal_float s then float_of_string_opt s else None
 
 let bool b = if b then "true" else "false"
 let to_bool = function "t" -> Some true | "f" -> Some false | _ -> None
@@ -71,7 +106,6 @@ let iso ~zone t =
 let timestamptz t = iso ~zone:"Z" t
 let timestamp t = iso ~zone:"" t
 let date (y, m, d) = Printf.sprintf "%04d-%02d-%02d" y m d
-let is_digit = function '0' .. '9' -> true | _ -> false
 
 let digits s i n =
   if i + n > String.length s then None
@@ -96,8 +130,9 @@ let to_date s =
     let* d = if at 7 '-' then digits s 8 2 else None in
     Option.map Ptime.to_date (Ptime.of_date (y, m, d))
 
-(* [YYYY-MM-DD HH:MM:SS[.ffffff]+HH[:MM[:SS]]] in any time zone. BC dates,
-   years past 9999 and infinity are refused. *)
+(* [YYYY-MM-DD HH:MM:SS[.ffffff]+HH[:MM[:SS]]] in any time zone, or with
+   [T] and [Z] as {!timestamptz} writes it. BC dates, years past 9999 and
+   infinity are refused. *)
 let to_timestamptz s =
   let ( let* ) = Option.bind in
   let at i c = i < String.length s && Char.equal s.[i] c in
@@ -122,6 +157,8 @@ let to_timestamptz s =
   let* frac = frac in
   let* offset_s =
     if i >= String.length s then Some 0
+    else if Char.equal s.[i] 'Z' then
+      if i + 1 = String.length s then Some 0 else None
     else
       let* sign =
         match s.[i] with '+' -> Some 1 | '-' -> Some (-1) | _ -> None
