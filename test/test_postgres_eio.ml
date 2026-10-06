@@ -300,11 +300,11 @@ let refusals =
       "no section defines";
     refused "54.7 a transaction status that is not I, T or E" (msg 'Z' "X")
       "transaction status";
-    refused "54.7 a column's format that is not 0 or 1"
+    refused "54.7 a column's format that is not 0 or 1, its name unquoted"
       (msg 'T'
-         (int16 1 ^ cstr "c" ^ int32 0 ^ int16 0 ^ int32 23 ^ int16 4
+         (int16 1 ^ cstr "salary" ^ int32 0 ^ int16 0 ^ int32 23 ^ int16 4
         ^ int32 (-1) ^ int16 2))
-      "the format 2";
+      "gives a column the format 2";
     refused "54.7 a COPY column's format that is not 0 or 1"
       (msg 'G' ("\000" ^ int16 1 ^ int16 2))
       "the format 2";
@@ -1646,7 +1646,7 @@ let a_reset_keeps_its_parameters () =
       (plain ())
   in
   terminate env sw (one t "select pg_backend_pid()::text" []);
-  (match Pg.query t "select 1" ~params:[] ~init:() ~row:(fun () _ -> ()) with
+  (match Pg.execute t "select 1" ~params:[] with
   | Error _ -> ()
   | Ok _ -> Alcotest.fail "a statement on a terminated backend succeeded");
   Alcotest.(check bool) "closed" true (Pg.closed t);
@@ -1686,9 +1686,7 @@ let a_read_past_the_timeout () =
   Pg.set_timeout t ~timeout_s:(Some 0.3);
   Alcotest.(check bool)
     "a timeout" true
-    (match
-       Pg.query t "select pg_sleep(2)" ~params:[] ~init:() ~row:(fun () _ -> ())
-     with
+    (match Pg.execute t "select pg_sleep(2)" ~params:[] with
     | Error Pg.Timeout -> true
     | _ -> false);
   Alcotest.(check bool)
@@ -1725,7 +1723,7 @@ let a_cancellation_from_outside_is_not_a_timeout () =
 let a_server_error_keeps_the_connection () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
-  (match Pg.query t "select 1/0" ~params:[] ~init:() ~row:(fun () _ -> ()) with
+  (match Pg.execute t "select 1/0" ~params:[] with
   | Error (Pg.Server e) ->
       Alcotest.(check string)
         "its SQLSTATE" "22012"
@@ -1745,10 +1743,7 @@ let a_server_error_keeps_the_connection () =
         | _ -> false);
       Alcotest.(check (option string)) "no hint" None (Pg.Server_error.hint e)
   | _ -> Alcotest.fail "not the server's error");
-  (match
-     Pg.query t "select no_such_function(1)" ~params:[] ~init:()
-       ~row:(fun () _ -> ())
-   with
+  (match Pg.execute t "select no_such_function(1)" ~params:[] with
   | Error (Pg.Server e) ->
       Alcotest.(check string)
         "an undefined function" "42883"
@@ -1759,10 +1754,7 @@ let a_server_error_keeps_the_connection () =
   | _ -> Alcotest.fail "not the server's error");
   script t "create temp table u (n int constraint u_n unique)";
   script t "insert into u values (1)";
-  (match
-     Pg.query t "insert into u values ($1::int)" ~params:[ Some "1" ] ~init:()
-       ~row:(fun () _ -> ())
-   with
+  (match Pg.execute t "insert into u values ($1::int)" ~params:[ Some "1" ] with
   | Error (Pg.Server e) ->
       Alcotest.(check string)
         "a unique violation" "23505"
@@ -1790,10 +1782,10 @@ let transaction_status () =
   in
   script t "begin";
   Alcotest.(check string) "54.7 ReadyForQuery T" "in" (status ());
-  ignore (Pg.query t "select 1/0" ~params:[] ~init:() ~row:(fun () _ -> ()));
+  ignore (Pg.execute t "select 1/0" ~params:[]);
   Alcotest.(check string) "54.7 ReadyForQuery E" "failed" (status ());
-  (match Pg.query t "commit" ~params:[] ~init:() ~row:(fun () _ -> ()) with
-  | Ok ((), tag) ->
+  (match Pg.execute t "commit" ~params:[] with
+  | Ok tag ->
       Alcotest.(check string)
         "a commit that rolled back" "ROLLBACK" (Pg.Tag.command tag)
   | Error e -> Alcotest.fail (Pg.error_to_string e));
@@ -1832,10 +1824,9 @@ let the_rest_of_a_query () =
   Alcotest.(check int) "a megabyte in one column" 1_000_000 (String.length big);
   script t "create temp table w (n int)";
   (match
-     Pg.query t "insert into w select generate_series(1, 5)" ~params:[] ~init:()
-       ~row:(fun () _ -> ())
+     Pg.execute t "insert into w select generate_series(1, 5)" ~params:[]
    with
-  | Ok ((), tag) ->
+  | Ok tag ->
       Alcotest.(check (option int)) "INSERT's count" (Some 5) (Pg.Tag.rows tag)
   | Error e -> Alcotest.fail (Pg.error_to_string e));
   (match
@@ -1851,6 +1842,44 @@ let the_rest_of_a_query () =
   | exception Exit -> ()
   | _ -> Alcotest.fail "the row's raise did not pass");
   Alcotest.(check bool) "a row that raised closed it" true (Pg.closed t);
+  Pg.close t
+
+(* [execute] answers a statement's tag and discards its rows; a refusal
+   keeps the connection, and pipelined ones answer in order. *)
+let executed_for_its_effect () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  script t "create temp table e (n int primary key)";
+  let tag = function
+    | Ok tag -> (Pg.Tag.command tag, Pg.Tag.rows tag)
+    | Error e -> Alcotest.fail (Pg.error_to_string e)
+  in
+  Alcotest.(check (pair string (option int)))
+    "an insert's tag" ("INSERT", Some 1)
+    (tag (Pg.execute t "insert into e values ($1)" ~params:[ Some "1" ]));
+  Alcotest.(check (pair string (option int)))
+    "a select's rows discarded and counted" ("SELECT", Some 3)
+    (tag (Pg.execute t "select generate_series(1, 3)" ~params:[]));
+  (match Pg.execute t "insert into e values ($1)" ~params:[ Some "1" ] with
+  | Error (Pg.Server e) ->
+      Alcotest.(check string) "a refusal" "23505" (Pg.Server_error.sqlstate e)
+  | _ -> Alcotest.fail "a duplicate was inserted");
+  Alcotest.(check bool) "and kept the connection" false (Pg.closed t);
+  let answers =
+    List.map
+      (fun n ->
+        Pg.Pipeline.execute t "insert into e values ($1)" ~params:[ Some n ])
+      [ "2"; "3"; "2" ]
+  in
+  (match List.map Pg.Pipeline.get answers with
+  | [ Ok first; Ok second; Error (Pg.Server _) ] ->
+      Alcotest.(check (list (option int)))
+        "54.2.4 pipelined, in order" [ Some 1; Some 1 ]
+        [ Pg.Tag.rows first; Pg.Tag.rows second ]
+  | _ -> Alcotest.fail "the pipelined answers");
+  Alcotest.(check string)
+    "three rows in all" "3"
+    (one t "select count(*)::text from e" []);
   Pg.close t
 
 let copy_is_refused () =
@@ -2089,12 +2118,9 @@ let refused_saying what needle = function
 
 let cancelled env t =
   let clock = Eio.Stdenv.mono_clock env in
-  let answer = ref (Ok ((), Pg.Tag.empty)) in
+  let answer = ref (Ok Pg.Tag.empty) in
   Eio.Fiber.both
-    (fun () ->
-      answer :=
-        Pg.query t "select pg_sleep(5)" ~params:[] ~init:() ~row:(fun () _ ->
-            ()))
+    (fun () -> answer := Pg.execute t "select pg_sleep(5)" ~params:[])
     (fun () ->
       Eio.Time.Mono.sleep clock 0.2;
       ok_pg (Pg.cancel t));
@@ -3030,7 +3056,7 @@ let a_long_pipeline_completes () =
        0 answers);
   Pg.close t
 
-(* A fake server that answers each statement with a [size]-byte row and
+(* A fake server that answers each Execute with a [size]-byte row and
    each CopyData with a [size]-byte notice, and stops reading while it
    writes. Direct on loopback: Docker's proxy buffers enough to hide a
    write-before-read deadlock. *)
@@ -3070,13 +3096,14 @@ let a_server_that_answers_big env sw ~size =
             | 'P' ->
                 statements ~parsed:true
                   ~copy:(contains (String.lowercase_ascii body) "copy")
+            | 'E' when not copy ->
+                write ((if parsed then described else "") ^ msg '2' "" ^ answer);
+                statements ~parsed:false ~copy
             | 'S' when copy ->
                 write (msg '1' "" ^ msg '2' "" ^ msg 'G' ("\000" ^ int16 0));
                 copying 0
             | 'S' ->
-                write
-                  ((if parsed then described else msg '2' "")
-                  ^ answer ^ msg 'Z' "I");
+                write (msg 'Z' "I");
                 statements ~parsed:false ~copy:false
             | 'X' -> ()
             | _ -> statements ~parsed ~copy
@@ -3126,6 +3153,14 @@ let longer_than_the_buffers () =
          | Error e, _ -> Error e
          | Ok _, Error e -> Error (Pg.error_to_string e))
        (Ok 0) answers);
+  (match
+     Pg.execute_many t "select $1" ~params:(List.init 2000 (fun _ -> [ param ]))
+   with
+  | Ok tags ->
+      Alcotest.(check int)
+        "54.2.4 a batch's two thousand answers, read as it is written" 2000
+        (List.length tags)
+  | Error e -> Alcotest.failf "the batch: %s" (Pg.error_to_string e));
   let rows = Seq.init 200_000 (fun _ -> [| Some (String.make 100 'r') |]) in
   (match Pg.copy_in_rows t ~table:"any" ~columns:[] rows with
   | Ok tag ->
@@ -3180,9 +3215,7 @@ let a_slow_row_function_is_not_timed () =
   | Ok (3, _) -> ()
   | Ok _ -> Alcotest.fail "rows lost"
   | Error e -> Alcotest.failf "%s" (Pg.error_to_string e));
-  (match
-     Pg.query t "select pg_sleep(1)" ~params:[] ~init:() ~row:(fun () _ -> ())
-   with
+  (match Pg.execute t "select pg_sleep(1)" ~params:[] with
   | Error Pg.Timeout -> ()
   | _ -> Alcotest.fail "a server slower than the timeout was waited for");
   Alcotest.(check bool) "and that closed it" true (Pg.closed t)
@@ -3497,9 +3530,7 @@ let no_secret_in_the_log () =
                 }
             in
             ignore (rows t "select $1::text" [ Some "token-SECRET-2" ]);
-            ignore
-              (Pg.query t "select $1::int" ~params:[ Some "SECRET-3" ] ~init:()
-                 ~row:(fun () _ -> ()));
+            ignore (Pg.execute t "select $1::int" ~params:[ Some "SECRET-3" ]);
             Pg.close t)
           [ Conninfo.Disable; Conninfo.Require ])
   in
@@ -3737,10 +3768,8 @@ let abandoned_until_resumed () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
   let clock = Eio.Stdenv.mono_clock env in
-  let sleep () =
-    Pg.query t "select pg_sleep(5)" ~params:[] ~init:() ~row:(fun () _ -> ())
-  in
-  let running = ref (Ok ((), Pg.Tag.empty)) in
+  let sleep () = Pg.execute t "select pg_sleep(5)" ~params:[] in
+  let running = ref (Ok Pg.Tag.empty) in
   Eio.Fiber.both
     (fun () -> running := sleep ())
     (fun () ->
@@ -3914,6 +3943,8 @@ let connection_cases =
     Alcotest.test_case "54.2.3 a batch is one round trip and one transaction"
       `Quick a_batch;
     Alcotest.test_case "54.2.4 a pipeline" `Quick a_pipeline;
+    Alcotest.test_case "a statement executed for its effect" `Quick
+      executed_for_its_effect;
     Alcotest.test_case "54.2.4 drain reads every answer, flush none" `Quick
       drain_and_flush;
     Alcotest.test_case "an abandoned connection refuses until resumed" `Quick
@@ -4021,8 +4052,7 @@ let an_abandoned_statement_is_stopped_at_the_server () =
      Eio.Time.with_timeout (Eio.Stdenv.clock env) 0.3 (fun () ->
          Ok
            (Pg.Pool.use p (fun t ->
-                Pg.query t "select pg_sleep(5)" ~params:[] ~init:()
-                  ~row:(fun () _ -> ()))))
+                Pg.execute t "select pg_sleep(5)" ~params:[])))
    with
   | Error `Timeout -> ()
   | Ok _ -> Alcotest.fail "the borrow was not abandoned");
@@ -4045,15 +4075,14 @@ let a_statement_not_yet_sent_is_never_sent () =
   borrow p (fun t ->
       script t
         "create table if not exists pgeio_unsent (n int); truncate pgeio_unsent");
-  let second = ref (Ok ((), Pg.Tag.empty)) in
+  let second = ref (Ok Pg.Tag.empty) in
   (match
      Eio.Time.with_timeout (Eio.Stdenv.clock env) 0.2 (fun () ->
          Ok
            (Pg.Pool.use p (fun t ->
                 Eio.Time.Mono.sleep clock 0.4;
                 second :=
-                  Pg.query t "insert into pgeio_unsent values (1)" ~params:[]
-                    ~init:() ~row:(fun () _ -> ()))))
+                  Pg.execute t "insert into pgeio_unsent values (1)" ~params:[])))
    with
   | Error `Timeout -> ()
   | Ok _ -> Alcotest.fail "the borrow was not abandoned");
@@ -4085,7 +4114,7 @@ let a_transaction_left_open_is_rolled_back () =
         "and nothing kept" "0"
         (one t "select count(*) from pgeio_open" []);
       script t "begin";
-      ignore (Pg.query t "select 1/0" ~params:[] ~init:() ~row:(fun () _ -> ())));
+      ignore (Pg.execute t "select 1/0" ~params:[]));
   borrow p (fun t ->
       Alcotest.(check bool)
         "an aborted one too" true
@@ -4103,9 +4132,7 @@ let a_pipeline_left_unread () =
         "create table if not exists pgeio_unread (n int); truncate pgeio_unread");
   borrow p (fun t ->
       List.iter
-        (fun sql ->
-          ignore
-            (Pg.Pipeline.query t sql ~params:[] ~init:() ~row:(fun () _ -> ())))
+        (fun sql -> ignore (Pg.Pipeline.execute t sql ~params:[]))
         [ "begin"; "insert into pgeio_unread values (1)" ]);
   borrow p (fun t ->
       Alcotest.(check bool)
@@ -4161,10 +4188,7 @@ let a_borrowers_session_is_not_the_next_ones () =
         (one t "select pg_backend_pid()::text" []);
       Alcotest.(check (list string))
         "and nothing of the last borrower's" fresh (what_is_left t);
-      match
-        Pg.query t "select currval('pgeio_seq')" ~params:[] ~init:()
-          ~row:(fun () _ -> ())
-      with
+      match Pg.execute t "select currval('pgeio_seq')" ~params:[] with
       | Error (Pg.Server _) -> ()
       | _ -> Alcotest.fail "the last borrower's sequence was seen");
   Pg.Pool.close p
@@ -4332,6 +4356,149 @@ let a_pool_is_borrowed_from_every_domain () =
   Alcotest.(check int) "every borrow was served" 15 (Atomic.get served);
   Pg.Pool.close p
 
+(* Everything below runs [f] on a second domain, against a connection or a
+   pool made on the first: a connection's timer, sockets and reconnects
+   must not need the domain that made it. *)
+let elsewhere env f = Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f
+
+let shared_pool ?(timeout_s = 30.) ?(c = plain ()) env sw =
+  ok_pg
+    (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
+       ~clock:(Eio.Stdenv.mono_clock env)
+       ~size:1 ~timeout_s c)
+
+(* A statement past its timeout on another domain fails as [Timeout], and
+   the pool, its switch and the connection carry on. *)
+let a_timeout_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let p = shared_pool ~timeout_s:0.5 env sw in
+  elsewhere env (fun () ->
+      borrow p (fun t ->
+          match Pg.execute t "select pg_sleep(2)" ~params:[] with
+          | Error Pg.Timeout -> ()
+          | Ok _ -> Alcotest.fail "no timeout"
+          | Error e -> Alcotest.fail (Pg.error_to_string e));
+      Alcotest.(check string)
+        "lent again there, reconnected" "1"
+        (borrow p (fun t -> one t "select 1" [])));
+  Alcotest.(check string)
+    "and here" "1"
+    (borrow p (fun t -> one t "select 1" []));
+  Pg.Pool.close p
+
+(* A connection found dead is reconnected on a lend from another domain. *)
+let a_reconnect_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let p = shared_pool env sw in
+  let pid = borrow p (fun t -> one t "select pg_backend_pid()::text" []) in
+  terminate env sw pid;
+  Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.1;
+  elsewhere env (fun () ->
+      borrow p (fun t ->
+          Alcotest.(check bool)
+            "a new backend" false
+            (String.equal pid (one t "select pg_backend_pid()::text" []))));
+  Pg.Pool.close p
+
+(* A borrower on another domain cancelled during a reconnect still returns
+   the connection. The fake server answers the sign-in, drops each
+   connection at its first statement, and stays silent while [answering]
+   is false. *)
+let a_cancelled_reconnect_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let net = Eio.Stdenv.net env and clock = Eio.Stdenv.mono_clock env in
+  let answering = Atomic.make true in
+  let released, release = Eio.Promise.create () in
+  let listener =
+    Eio.Net.listen ~sw ~backlog:4 net (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr listener with `Tcp (_, p) -> p | `Unix _ -> 0
+  in
+  let rec serve () =
+    Eio.Net.accept_fork ~sw listener ~on_error:ignore (fun flow _ ->
+        if Atomic.get answering then (
+          let buf = Cstruct.create 1024 in
+          ignore (Eio.Flow.single_read flow buf : int);
+          Eio.Flow.copy_string (msg 'R' (int32 0) ^ msg 'Z' "I") flow;
+          ignore (Eio.Flow.single_read flow buf : int))
+        else Eio.Promise.await released);
+    serve ()
+  in
+  Eio.Fiber.fork_daemon ~sw serve;
+  let c =
+    match
+      Conninfo.of_string
+        (Printf.sprintf "host=127.0.0.1 port=%d user=anybody sslmode=disable"
+           port)
+    with
+    | Ok c -> c
+    | Error e -> Alcotest.fail e
+  in
+  let p = shared_pool ~c env sw in
+  borrow p (fun t ->
+      Alcotest.(check bool)
+        "dropped at its first statement" true
+        (Result.is_error (Pg.script t "select 1")));
+  Atomic.set answering false;
+  elsewhere env (fun () ->
+      Eio.Fiber.first
+        (fun () ->
+          match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
+          | Ok () | Error `Busy -> ())
+        (fun () -> Eio.Time.Mono.sleep clock 0.2));
+  Atomic.set answering true;
+  Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);
+  Eio.Promise.resolve release ();
+  Pg.Pool.close p
+
+(* A borrow cancelled on another domain stops its statement at the
+   server. *)
+let an_abandoned_borrow_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let p = shared_pool env sw in
+  let clock = Eio.Stdenv.mono_clock env in
+  let started = Eio.Time.Mono.now clock in
+  elsewhere env (fun () ->
+      Eio.Fiber.first
+        (fun () ->
+          ignore
+            (Pg.Pool.use p (fun t ->
+                 Pg.execute t "select pg_sleep(5)" ~params:[])
+              : ((Pg.Tag.t, Pg.error) result, [ `Busy ]) result))
+        (fun () -> Eio.Time.Mono.sleep clock 0.3));
+  let took = seconds_since clock started in
+  Alcotest.(check bool)
+    (Printf.sprintf "ended at the server, in %.2fs" took)
+    true (took < 2.);
+  Alcotest.(check string)
+    "and taking statements" "1"
+    (borrow p (fun t -> one t "select 1" []));
+  Pg.Pool.close p
+
+(* A TLS session made on one domain carries statements on another. *)
+let a_tls_connection_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let p = shared_pool ~c:{ (base ()) with ssl_mode = Require } env sw in
+  elsewhere env (fun () ->
+      Alcotest.(check bool) "over TLS" true (borrow p tls_in_use));
+  Pg.Pool.close p
+
+(* A connection made on one domain is timed out, reset and closed on
+   another, and closed there it is closed here. *)
+let a_connection_used_in_another_domain () =
+  with_eio @@ fun env sw ->
+  let t = connect ~timeout_s:0.5 env sw (plain ()) in
+  elsewhere env (fun () ->
+      (match Pg.execute t "select pg_sleep(2)" ~params:[] with
+      | Error Pg.Timeout -> ()
+      | Ok _ -> Alcotest.fail "no timeout"
+      | Error e -> Alcotest.fail (Pg.error_to_string e));
+      ok_pg (Pg.reset t);
+      Alcotest.(check string) "reset there" "1" (one t "select 1" []);
+      Pg.close t);
+  Alcotest.(check bool) "closed here too" true (Pg.closed t)
+
 (* Both warnings: a long hold and a long wait. *)
 let the_pool_says_when_it_is_in_trouble () =
   let lines =
@@ -4447,6 +4614,18 @@ let pool_cases =
   [
     Alcotest.test_case "a pool is borrowed from every domain" `Quick
       a_pool_is_borrowed_from_every_domain;
+    Alcotest.test_case "a timeout in another domain" `Quick
+      a_timeout_in_another_domain;
+    Alcotest.test_case "a reconnect in another domain" `Quick
+      a_reconnect_in_another_domain;
+    Alcotest.test_case "a cancelled reconnect in another domain" `Quick
+      a_cancelled_reconnect_in_another_domain;
+    Alcotest.test_case "an abandoned borrow in another domain" `Quick
+      an_abandoned_borrow_in_another_domain;
+    Alcotest.test_case "a TLS connection in another domain" `Quick
+      a_tls_connection_in_another_domain;
+    Alcotest.test_case "a connection used in another domain" `Quick
+      a_connection_used_in_another_domain;
     Alcotest.test_case "the pool says when it is in trouble" `Quick
       the_pool_says_when_it_is_in_trouble;
     Alcotest.test_case "a held pool is busy, then serves" `Quick

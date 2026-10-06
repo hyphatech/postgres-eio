@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `execute` and `Pipeline.execute` run a statement for its effect and
+  answer its tag, where `query` needed `~init:() ~row:(fun () _ -> ())`.
+- A RowDescription with a column format other than text or binary is
+  refused without quoting the column's name, as no other protocol error
+  quotes what the server sent.
+- A connection, pooled or not, is safe to use from a domain other than the
+  one that made it. A statement timing out there failed the switch the
+  connection was made on, and a reconnect there raised `Invalid_argument`
+  from `reset` and `Pool.use`. Timing a statement now costs about 5 µs of
+  CPU per round trip.
+- `execute_many` reads its answers while it writes, where a batch whose
+  answers outgrew the socket buffers stalled until the timeout and lost
+  the connection.
 - A connection string whose password holds a malformed percent escape, or
   an unescaped `?` or `/`, is refused without quoting the password in the
   error.

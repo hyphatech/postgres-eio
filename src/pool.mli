@@ -1,7 +1,8 @@
 (** A fixed-size connection pool.
 
     All connections are made by {!create}, so a refused connection fails at
-    startup rather than in the middle of a request.
+    startup rather than in the middle of a request. One pool serves borrowers on
+    every domain.
 
     Every lend is clean: no open transaction, no [LISTEN], the original timeout,
     and by default none of a previous borrower's session state (settings,

@@ -4,7 +4,7 @@
 [![release](https://img.shields.io/github/v/release/hyphatech/postgres-eio?label=release)](https://github.com/hyphatech/postgres-eio/releases)
 [![license](https://img.shields.io/github/license/hyphatech/postgres-eio)](LICENSE)
 ![OCaml 5.4+](https://img.shields.io/badge/OCaml-5.4%2B-EC6813?logo=ocaml&logoColor=white)
-![PostgreSQL 14–18](https://img.shields.io/badge/PostgreSQL-14%E2%80%9318-336791?logo=postgresql&logoColor=white)
+![tested on PostgreSQL 18](https://img.shields.io/badge/tested%20on-PostgreSQL%2018-336791?logo=postgresql&logoColor=white)
 
 A native Postgres driver for OCaml 5 and Eio.
 
@@ -17,7 +17,7 @@ A native Postgres driver for OCaml 5 and Eio.
 - A connection pool that lends every connection in a clean state.
 - Every failure is a value, and no log line or error contains a secret.
 
-Works with Postgres 14 to 18.
+Tested with Postgres 18.
 
 ## Install
 
@@ -58,6 +58,13 @@ let () =
 
 Parameters are `$1`, `$2`, ... with `None` for NULL. Rows are folded as they
 arrive and never buffered.
+
+A statement run for its effect needs no fold, and answers its tag:
+
+```ocaml
+Postgres_eio.execute conn "insert into orders values ($1, $2)"
+  ~params:[ Some id; Some total ]
+```
 
 ## Connection strings
 
@@ -100,7 +107,8 @@ Postgres_eio.Conninfo.of_string
 
 All connections open at startup, so a bad configuration fails at once. A
 returned connection is reset (open transaction, settings, temporary tables,
-locks, `LISTEN`), and the reset costs the next borrower no round trip.
+locks, `LISTEN`), and the reset costs the next borrower no round trip. One
+pool serves borrowers on every domain.
 
 ```ocaml
 let count pool =

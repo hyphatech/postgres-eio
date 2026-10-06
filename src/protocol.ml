@@ -270,11 +270,11 @@ let oid c =
   | Some oid -> oid
   | None -> refuse c (Printf.sprintf "has an OID %d past four bytes" n)
 
-let format_of c what =
+let format_of c =
   match sint16 c with
   | 0 -> Text
   | 1 -> Binary
-  | n -> refuse c (Printf.sprintf "gives %s the format %d, not 0 or 1" what n)
+  | n -> refuse c (Printf.sprintf "gives a column the format %d, not 0 or 1" n)
 
 let bytes c n =
   need c n "ends inside a value";
@@ -318,7 +318,7 @@ let copy c =
     | n -> refuse c (Printf.sprintf "has an overall format %d, not 0 or 1" n)
   in
   let n = int16 c in
-  { format; columns = List.init n (fun _ -> format_of c "a column") }
+  { format; columns = List.init n (fun _ -> format_of c) }
 
 let authentication c =
   match int32 c with
@@ -366,7 +366,7 @@ let message tag c =
              let type_oid = oid c in
              let type_size = sint16 c in
              let type_modifier = int32 c in
-             let format = format_of c (Printf.sprintf "%S" name) in
+             let format = format_of c in
              { name; table; column; type_oid; type_size; type_modifier; format }))
   | 'D' ->
       let n = int16 c in

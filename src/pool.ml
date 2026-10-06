@@ -15,7 +15,7 @@ type entry = {
   expires : Mtime.t;
   mutable idle_since : Mtime.t;
   (* Queued at give-back, read at the next lend. *)
-  mutable resetting : (unit * Tag.t) C.Pipeline.answer list;
+  mutable resetting : Tag.t C.Pipeline.answer list;
 }
 
 (* Not [Eio.Pool]: connections are made up front, and its wait has no
@@ -92,10 +92,7 @@ let queue_reset t e =
   | [] -> ()
   | statements ->
       e.resetting <-
-        List.map
-          (fun sql ->
-            C.Pipeline.query conn sql ~params:[] ~init:() ~row:(fun () _ -> ()))
-          statements;
+        List.map (fun sql -> C.Pipeline.execute conn sql ~params:[]) statements;
       (* A failed write closes the connection; the next lend reconnects. *)
       ignore (C.Pipeline.flush conn : (unit, C.error) result)
 
@@ -133,9 +130,8 @@ let ready e =
         e
   | None -> ()
 
-(* Drains outstanding answers, drops anything queued but unsent, restores
-   the original timeout and queues the reset. A connection returned after
-   [close] is closed instead. *)
+(* Drained before [resume], while an abandoned borrower's statements are
+   still refused, so one queued but unsent is dropped, never sent. *)
 let give_back t e =
   ignore (C.Pipeline.drain e.conn : (unit, C.error) result);
   C.resume e.conn;
@@ -192,8 +188,7 @@ let check t e =
                 (C.error_to_string err));
           back t e)
 
-(* Visits idle connections only: replaces those past their lifetime and
-   pings those idle past [idle_check_s]. *)
+(* Idle connections only: a borrowed one is its borrower's alone. *)
 let tidy t =
   let at = now t in
   let expired e = Mtime.is_later at ~than:e.expires in

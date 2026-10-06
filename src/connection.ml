@@ -74,7 +74,6 @@ type link = {
   mutable waiting : int;
   mutable moved : Mtime.t;
   mutable writing : bool;
-  mutable exchanging : Eio.Cancel.t option;
 }
 
 (* Where the link went, so a cancel request can reach the same server. *)
@@ -94,8 +93,6 @@ type t = {
   statement_cache : int;
   mutable timeout_s : float option;
   mutable link : link option;
-  (* Wakes the link's timer when the timeout or link changes. *)
-  changed : Eio.Condition.t;
   (* Set by [abandon]: later statements are refused before sending. *)
   mutable refusing : bool; [@atomic]
   mutable status : P.transaction_status;
@@ -246,69 +243,33 @@ let name_of = function
 let out_of_turn section m when_ =
   fail (Protocol (Printf.sprintf "%s: %s %s" section (name_of m) when_))
 
-(* One timer per link, not per exchange (which cost a fiber and a timer
-   registration every round trip). It sleeps until the timeout would expire
-   since the last byte moved, and cancels the waiting exchange if none has.
-   Time is only counted while waiting on the server, never during the
-   caller's row function. *)
-let rec watch t link =
-  match t.link with
-  | Some current when current == link -> (
-      match t.timeout_s with
-      | None ->
-          Eio.Condition.await_no_mutex t.changed;
-          watch t link
-      | Some s ->
-          let span =
-            Option.value
-              (Mtime.Span.of_float_ns (s *. 1e9))
-              ~default:Mtime.Span.zero
-          in
-          if
-            link.waiting > 0
-            && Mtime.Span.compare (Mtime.span link.moved (now t)) span >= 0
-          then begin
-            Option.iter
-              (fun cc -> Eio.Cancel.cancel cc (Fail Timeout))
-              link.exchanging;
-            Eio.Condition.await_no_mutex t.changed
-          end
-          else begin
-            let from = if link.waiting > 0 then link.moved else now t in
-            Eio.Fiber.first
-              (fun () ->
-                Eio.Time.Mono.sleep_until t.clock
-                  (Option.value (Mtime.add_span from span)
-                     ~default:Mtime.max_stamp))
-              (fun () -> Eio.Condition.await_no_mutex t.changed)
-          end;
-          watch t link)
-  | Some _ | None -> `Stop_daemon
-
-let linked t link =
-  t.link <- Some link;
-  Eio.Fiber.fork_daemon ~sw:t.sw (fun () -> watch t link)
-
-(* The link's timer cancels this context; any other cancellation is the
-   caller's and propagates unchanged. *)
+(* The timer runs beside each exchange, in the exchanging fiber's domain:
+   a connection may be used from a domain other than the one that made it,
+   and Eio cancels a fiber, or forks one onto a switch, only from the
+   switch's own domain. That costs a fiber per exchange, about 5 us of CPU
+   a round trip. It sleeps until the timeout would expire since the last
+   byte moved, and fails the exchange if none has. Time is only counted
+   while waiting on the server, never during the caller's row function. *)
 let exchange t link f =
   match t.timeout_s with
   | None -> f ()
-  | Some _ -> (
-      match
-        Eio.Cancel.sub (fun cc ->
-            link.exchanging <- Some cc;
-            f ())
-      with
-      | v ->
-          link.exchanging <- None;
-          v
-      | exception Eio.Cancel.Cancelled (Fail Timeout) ->
-          link.exchanging <- None;
-          fail Timeout
-      | exception ex ->
-          link.exchanging <- None;
-          raise ex)
+  | Some s ->
+      let span =
+        Option.value
+          (Mtime.Span.of_float_ns (s *. 1e9))
+          ~default:Mtime.Span.zero
+      in
+      let rec timer () =
+        let from = if link.waiting > 0 then link.moved else now t in
+        Eio.Time.Mono.sleep_until t.clock
+          (Option.value (Mtime.add_span from span) ~default:Mtime.max_stamp);
+        if
+          link.waiting > 0
+          && Mtime.Span.compare (Mtime.span link.moved (now t)) span >= 0
+        then fail Timeout
+        else timer ()
+      in
+      Eio.Fiber.first f timer
 
 (* TLS *)
 
@@ -458,8 +419,11 @@ let password t (endpoint : C.endpoint) =
         (Refused
            "the server asks for a password and the connection string gives none")
 
+(* 24 base64 characters, as libpq's SCRAM_RAW_NONCE_LEN. *)
+let nonce_bytes = 18
+
 let scram t link endpoint ~binding ~mechanism =
-  let nonce = Base64.encode_string (Mirage_crypto_rng.generate 18) in
+  let nonce = Base64.encode_string (Mirage_crypto_rng.generate nonce_bytes) in
   let exchange, first =
     Auth.client_first ~binding ~password:(password t endpoint) ~nonce ()
   in
@@ -797,7 +761,6 @@ let attempt t endpoint address ~tls =
         waiting = 0;
         moved = now t;
         writing = false;
-        exchanging = None;
       }
     in
     t.settings <- [];
@@ -964,7 +927,6 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
           statement_cache = Int.max 0 statement_cache;
           timeout_s = Some timeout_s;
           link = None;
-          changed = Eio.Condition.create ();
           refusing = false;
           status = P.Idle;
           pid = 0;
@@ -977,7 +939,7 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
       in
       match establish t with
       | link ->
-          linked t link;
+          t.link <- Some link;
           Ok t
       | exception Fail e -> Error e)
 
@@ -993,7 +955,6 @@ let break t e =
   | None -> ()
   | Some link ->
       t.link <- None;
-      Eio.Condition.broadcast t.changed;
       close_quietly link.socket;
       Buffer.reset link.out;
       let lose q =
@@ -1028,7 +989,7 @@ let enqueue link bytes reply =
   Buffer.add_string link.out bytes;
   Queue.add reply link.unsent
 
-(* When refusing statements, queued bytes are dropped instead. *)
+(* An abandoned borrower's statements never reach the server. *)
 let take_queued t link =
   if t.refusing then begin
     Buffer.clear link.out;
@@ -1057,12 +1018,14 @@ let rec read_through link target =
 (* Write and read concurrently: writing everything first can deadlock with
    both sides' buffers full. While writing, every reply is read, not just
    up to [through]'s, since the server stops reading while its answers
-   wait. *)
+   wait. Only one reply of one piece is written first, saving a fiber per
+   round trip: the socket buffers hold that much, where a batch's answers
+   can outgrow them while it is still being written. *)
 let drive ?through t link =
   let last = Queue.fold (fun _ r -> Some r) None link.unsent in
   let bytes = take_queued t link in
   if String.length bytes = 0 then read_through link through
-  else if Queue.length link.sent <= 1 then begin
+  else if Queue.length link.sent <= 1 && String.length bytes <= piece then begin
     write t link bytes;
     read_through link through
   end
@@ -1316,7 +1279,7 @@ let bind ?(results = [||]) name params =
   P.Bind
     { portal = ""; statement = name; params; results = Array.to_list results }
 
-let execute = P.Execute { portal = ""; max_rows = 0 }
+let execute_all = P.Execute { portal = ""; max_rows = 0 }
 
 let queue_statement t link sql ~params ~results ~columns ~init ~row ~answered =
   let use, begun = prepare link sql in
@@ -1336,7 +1299,7 @@ let queue_statement t link sql ~params ~results ~columns ~init ~row ~answered =
   queue_use t link use
     (begun
     @ (bind ~results (name_of_use use) params :: described)
-    @ [ execute; P.Sync ])
+    @ [ execute_all; P.Sync ])
     reply;
   reply
 
@@ -1414,6 +1377,9 @@ let query ?(columns = ignore) ?(binary = false) t sql ~params ~init ~row =
       in
       once_more_if_stale t (attempt ()) attempt)
 
+let execute t sql ~params =
+  Result.map snd (query t sql ~params ~init:() ~row:(fun () _ -> ()))
+
 (* One Sync for all rows: a single implicit transaction. *)
 let read_many t link use =
   let rec loop tags failed parsed =
@@ -1472,7 +1438,7 @@ let execute_many t sql ~params =
             queue_use t link use
               (begun
               @ List.concat_map
-                  (fun params -> [ bind name params; execute ])
+                  (fun params -> [ bind name params; execute_all ])
                   rows
               @ [ P.Sync ])
               reply;
@@ -1569,9 +1535,9 @@ module Pipeline = struct
     mutable result : ('a, error) result option;
   }
 
-  let query ?(columns = ignore) conn sql ~params ~init ~row =
+  let queued conn sql ~params ~columns ~init ~row ~finish =
     let a = { conn; reply = None; result = None } in
-    let answered r = a.result <- Some r in
+    let answered r = a.result <- Some (finish r) in
     (match conn.link with
     | None -> answered (Error Closed)
     | Some _ when conn.refusing -> answered (Error abandoned)
@@ -1583,6 +1549,14 @@ module Pipeline = struct
         | reply -> a.reply <- Some reply
         | exception Fail e -> answered (Error e)));
     a
+
+  let query ?(columns = ignore) conn sql ~params ~init ~row =
+    queued conn sql ~params ~columns ~init ~row ~finish:Fun.id
+
+  let execute conn sql ~params =
+    queued conn sql ~params ~columns:ignore ~init:()
+      ~row:(fun () _ -> ())
+      ~finish:(Result.map snd)
 
   let get a =
     (match (a.result, a.reply) with
@@ -1619,7 +1593,7 @@ let copy_statement sql =
     [
       encode (P.Parse { name = ""; query = sql });
       encode (bind "" []);
-      encode execute;
+      encode execute_all;
       encode P.Sync;
     ]
 
@@ -1636,7 +1610,8 @@ let rec answer t link =
   | P.Parse_complete | P.Bind_complete -> answer t link
   | m -> m
 
-(* Reads to ReadyForQuery keeping the tag and the first error. *)
+(* 54.2.6: after an error the server skips to the Sync, so the rest is
+   read to ReadyForQuery whatever came first. *)
 let rec copy_rest ?(awaited = true) ?(refused = ignore) t link ~tag ~failed m =
   let continue ~tag ~failed =
     copy_rest ~awaited ~refused t link ~tag ~failed (message ~awaited t link)
@@ -1946,13 +1921,7 @@ let parameter t name = List.assoc_opt name t.settings
 let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache
 let timeout_s t = t.timeout_s
-
-(* Only on change: the pool restores the timeout on every return. *)
-let set_timeout t ~timeout_s =
-  if not (Option.equal Float.equal timeout_s t.timeout_s) then begin
-    t.timeout_s <- timeout_s;
-    Eio.Condition.broadcast t.changed
-  end
+let set_timeout t ~timeout_s = t.timeout_s <- timeout_s
 
 (* 54.2.8: a separate connection to the same server. Waits for the server
    to close it, so the request was read when this returns. Safe to call
@@ -2020,7 +1989,7 @@ let reset t =
   close t;
   match establish t with
   | link ->
-      linked t link;
+      t.link <- Some link;
       Ok ()
   | exception Fail e -> Error e
 
@@ -2039,8 +2008,8 @@ let notify t ~channel payload =
             (String.length payload) payload_limit))
   else
     Result.map ignore
-      (query t "select pg_notify($1, $2)" ~params:[ Some channel; Some payload ]
-         ~init:() ~row:(fun () _ -> ()))
+      (execute t "select pg_notify($1, $2)"
+         ~params:[ Some channel; Some payload ])
 
 (* Waits on socket readiness, bounded by [seconds], never on a cancellable
    read: tls-eio stores a cancelled read's exception as the session error

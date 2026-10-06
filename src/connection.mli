@@ -1,6 +1,7 @@
 (** A connection to Postgres.
 
-    Use a connection from one fiber at a time: there is no locking. Only
+    Use a connection from one fiber at a time: there is no locking. That fiber
+    may be on any domain, not only the one that made the connection. Only
     {!cancel} and {!abandon} may be called from another fiber.
 
     Every failure is a value. Driver errors and logs never contain parameters,
@@ -81,6 +82,11 @@ val query :
     costing one extra round trip on a statement's first run, and is refused when
     the cache is off. *)
 
+val execute : t -> string -> params:string option list -> (Tag.t, error) result
+(** Runs one statement for its effect, as {!query} does, and returns its tag:
+    [execute conn "insert into t values ($1)" ~params:[ Some "1" ]]. Returned
+    rows are discarded. *)
+
 val execute_many :
   t -> string -> params:string option list list -> (Tag.t list, error) result
 (** Runs one statement per parameter list in one round trip and one implicit
@@ -124,6 +130,9 @@ module Pipeline : sig
     ('a * Tag.t) answer
   (** Queues a statement, as {!Postgres_eio.query}. Encoding errors surface in
       its answer. *)
+
+  val execute : conn -> string -> params:string option list -> Tag.t answer
+  (** Queues a statement for its effect, as {!Postgres_eio.execute}. *)
 
   val get : 'a answer -> ('a, error) result
   (** Sends everything queued and reads answers up to this one. *)
