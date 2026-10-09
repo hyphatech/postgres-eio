@@ -265,6 +265,42 @@ let at_any_split =
       in
       List.equal String.equal (feed [] cuts) expected)
 
+(* What the heap holds once a full collection has run. *)
+let live_bytes () =
+  Gc.full_major ();
+  (Gc.stat ()).live_words * (Sys.word_size / 8)
+
+(* One message of a mebibyte, fed as the connection reads, and taken. *)
+let grown r =
+  let bytes = msg 'd' (String.make (1 lsl 20) 'x') in
+  let piece = 65536 in
+  let rec go off =
+    if off < String.length bytes then begin
+      feed_string r bytes off (Int.min piece (String.length bytes - off));
+      go (off + piece)
+    end
+  in
+  go 0;
+  match P.next r with
+  | Ok (Some (P.Copy_data _)) -> ()
+  | Ok _ -> Alcotest.fail "not the CopyData fed"
+  | Error e -> Alcotest.fail e
+[@@inline never]
+
+(* A reader that grew for one large message gives the space back once it
+   is empty, so a pooled connection does not hold its largest row's size
+   for its whole life. *)
+let a_grown_reader_shrinks_once_empty () =
+  let r = P.reader () in
+  let before = live_bytes () in
+  grown r;
+  Alcotest.(check int) "nothing held" 0 (P.buffered r);
+  let held = live_bytes () - before in
+  ignore (Sys.opaque_identity r);
+  if held >= 65536 then
+    Alcotest.failf
+      "the empty reader still holds %d bytes more than it began with" held
+
 let refused name bytes needle =
   Alcotest.test_case name `Quick (fun () ->
       let r = P.reader () in
@@ -5048,7 +5084,13 @@ let pool_cases =
 let () =
   Alcotest.run "postgres_eio"
     [
-      ("messages", row_cases @ [ QCheck_alcotest.to_alcotest at_any_split ]);
+      ( "messages",
+        row_cases
+        @ [
+            QCheck_alcotest.to_alcotest at_any_split;
+            Alcotest.test_case "a grown reader shrinks once empty" `Quick
+              a_grown_reader_shrinks_once_empty;
+          ] );
       ( "refusals",
         refusals
         @ [

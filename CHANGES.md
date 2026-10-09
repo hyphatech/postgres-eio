@@ -45,6 +45,9 @@
 - Connecting keeps a random generator the application set as
   mirage-crypto's default, and sets one only where none is. Every
   connection replaced it with `Mirage_crypto_rng_unix.use_default ()`.
+- A connection's read buffer goes back to 4 KiB once it is empty after a
+  message over 128 KiB. It kept the size of the largest message it had
+  read, so one large row held that memory for a pooled connection's life.
 - A keyword connection string whose password holds an unquoted space no
   longer quotes the part after the space in its error, which was part of
   the password. A word after `password=` is never quoted; the error says

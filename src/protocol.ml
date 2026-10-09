@@ -462,9 +462,17 @@ type reader = {
 }
 
 let default_limit = 1 lsl 30
+let initial_size = 4096
+
+(* A buffer past this held a message that large, and goes back to
+   [initial_size] once empty, so a pooled connection does not keep its
+   largest row's size for life. Twice the connection's 64 KiB read, which
+   a buffer holding a part-read message reaches in ordinary traffic, so
+   that traffic never shrinks and regrows it. *)
+let kept_size = 131072
 
 let reader ?(limit = default_limit) () =
-  { data = Bytes.create 4096; start = 0; stop = 0; limit }
+  { data = Bytes.create initial_size; start = 0; stop = 0; limit }
 
 let feed r cs =
   let len = Cstruct.length cs in
@@ -509,7 +517,10 @@ let next r =
     else
       let body = Bytes.sub_string r.data (r.start + 5) (len - 4) in
       r.start <- r.start + 1 + len;
-      if r.start = r.stop then (
+      if r.start = r.stop then begin
         r.start <- 0;
-        r.stop <- 0);
+        r.stop <- 0;
+        if Bytes.length r.data > kept_size then
+          r.data <- Bytes.create initial_size
+      end;
       Result.map Option.some (decode tag body)
