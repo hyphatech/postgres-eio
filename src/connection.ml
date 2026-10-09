@@ -448,10 +448,13 @@ let scram t link endpoint ~binding ~mechanism =
       out_of_turn "54.3.1 SCRAM-SHA-256" m
         "where AuthenticationSASLContinue was due"
 
+(* 54.2.1: the minor version a StartupMessage asks for. *)
+let protocol_minor = function C.V3_0 -> 0 | C.V3_2 -> 2
+
 (* 54.2.1: the server may downgrade the minor version, down to the
    connection string's minimum. *)
 let negotiated t newest_minor =
-  let least = C.protocol_minor t.conninfo.min_protocol_version in
+  let least = protocol_minor t.conninfo.min_protocol_version in
   if newest_minor < least then
     fail
       (Refused
@@ -589,7 +592,7 @@ let rec ready t link =
 (* The caller's parameters override the connection string's. *)
 let start t link endpoint =
   let c = t.conninfo in
-  t.protocol_minor <- C.protocol_minor c.max_protocol_version;
+  t.protocol_minor <- protocol_minor c.max_protocol_version;
   let settings =
     List.filter (fun (k, _) -> not (List.mem_assoc k t.parameters)) c.options
     @ t.parameters

@@ -64,6 +64,9 @@
   as the connection closes, as a timeout does, and its exception still
   propagates as raised. The connection closed alone, and the server ran
   the statement to its end with nobody to read it.
+- Breaking: `Conninfo.protocol_minor` is no longer exported. It was a
+  step of the start-up, the minor version a StartupMessage carries, and
+  nothing outside the driver used it.
 
 ## 0.1.0 (2026-10-06)
 

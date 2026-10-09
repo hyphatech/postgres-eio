@@ -121,6 +121,3 @@ val to_url : t -> string
 
 val ssl_mode_to_string : ssl_mode -> string
 (** E.g. [verify-full]. *)
-
-val protocol_minor : protocol_version -> int
-(** [0] for 3.0, [2] for 3.2. *)
