@@ -298,12 +298,12 @@ let stats (t : t) =
     replaced = Atomic.get t.replaced;
   }
 
-let wait_warn_ms = 100.
-let hold_warn_ms = 250.
+let wait_warn_s = 0.1
+let hold_warn_s = 0.25
 
-let slow ~what ~over since until =
-  let ms = Mtime.Span.to_float_ns (Mtime.span since until) /. 1e6 in
-  if ms > over then Log.warn (fun m -> m "%s took %.0f ms" what ms)
+let slow ~what ~over_s since until =
+  let s = Mtime.Span.to_float_ns (Mtime.span since until) /. 1e9 in
+  if s > over_s then Log.warn (fun m -> m "%s took %.0f ms" what (s *. 1000.))
 
 (* Both [Fiber.first] branches can succeed at once, and the loser's result
    is dropped; if that were a connection it would leak from the pool. So
@@ -329,7 +329,7 @@ let use ?wait_s t f =
       Error `Busy
   | Some e ->
       let given = now t in
-      slow ~what:"a wait for a connection" ~over:wait_warn_ms asked given;
+      slow ~what:"a wait for a connection" ~over_s:wait_warn_s asked given;
       (* [f] is not shielded: a cancellation stops it at whatever it is
          waiting on. Only the give-back's own exchanges are. *)
       let answer, cancelled =
@@ -345,7 +345,7 @@ let use ?wait_s t f =
       in
       let raised =
         Eio.Cancel.protect (fun () ->
-            slow ~what:"a borrowed connection" ~over:hold_warn_ms given (now t);
+            slow ~what:"a borrowed connection" ~over_s:hold_warn_s given (now t);
             give_back t e ~cancelled)
       in
       (* What the borrower raised, a cancellation included, came first and
