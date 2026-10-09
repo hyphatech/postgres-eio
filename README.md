@@ -10,7 +10,7 @@ A native Postgres driver for OCaml 5 and Eio.
 
 - Protocol 3.0 and 3.2 over TCP, Unix sockets and TLS, with multi-host
   failover and load balancing.
-- SCRAM-SHA-256 with channel binding, MD5, client certificates.
+- SCRAM-SHA-256 (RFC 7677) with channel binding, MD5, client certificates.
 - Statement caching, pipelining and batches in one round trip.
 - COPY in and out, streamed. LISTEN/NOTIFY with automatic reconnection.
 - Text and binary results.
