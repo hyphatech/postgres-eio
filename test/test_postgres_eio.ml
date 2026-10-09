@@ -782,7 +782,8 @@ let conninfo_cases =
             "postgres://app@db/go?password=s3cr3t%g1";
           ]);
     (* A password holding an unescaped URL delimiter splits the URL there,
-       and the error must not quote the piece after it. *)
+       and one holding a space splits keyword/value pairs; the error must
+       not quote the piece after it. *)
     Alcotest.test_case "a delimiter in a password is not quoted" `Quick
       (fun () ->
         List.iter
@@ -799,6 +800,10 @@ let conninfo_cases =
             "postgres://app:ab12/cd34@db/go?user=app";
             "postgres://app:ab12#cd34@db/go";
             "postgres://app:ab12&cd34@db/go";
+            "user=app password=ab12 cd34";
+            "password=ab12 cd34 user=app";
+            "user=app password=ab12 cd34=ef";
+            "password = ab12 cd34 = ef user=app";
           ]);
     refuses "another scheme" "mysql://app@db/go" "postgres://";
   ]

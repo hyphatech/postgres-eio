@@ -34,6 +34,10 @@
   retried with backoff, as a lost connection is, and no longer returned by
   `next`. It ended the loop with the error, though the server would take
   the sign-in a moment later. Any other server refusal is still returned.
+- A keyword connection string whose password holds an unquoted space no
+  longer quotes the part after the space in its error, which was part of
+  the password. A word after `password=` is never quoted; the error says
+  to quote the password, `password='a b'`.
 
 ## 0.1.0 (2026-10-06)
 

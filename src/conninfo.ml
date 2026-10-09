@@ -677,8 +677,24 @@ let pairs_of_keywords s =
       let k = key_end i in
       let key = String.sub s i (k - i) in
       let e = skip k in
+      (* What follows a password may be the rest of it, cut at a space, so
+         it is never quoted. *)
+      let after_password =
+        List.exists (fun (k, _) -> String.equal k "password") acc
+      in
+      let hint = "; a password holding a space is quoted: password='a b'" in
       if e >= n || not (Char.equal s.[e] '=') then
-        Error (Printf.sprintf "the connection string's %S has no =" key)
+        Error
+          (if after_password then
+             "a word after the connection string's password has no =" ^ hint
+           else Printf.sprintf "the connection string's %S has no =" key)
+      else if
+        after_password
+        && not (List.mem key keys || String.equal key "sslpassword")
+      then
+        Error
+          ("a key after the connection string's password is not one this \
+            driver reads" ^ hint)
       else
         let* v, next = value (skip (e + 1)) in
         pairs next ((key, v) :: acc)
