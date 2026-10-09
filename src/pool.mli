@@ -52,7 +52,10 @@ val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy ]) result
 
     A connection whose reset failed or that was closed is reconnected on lend.
     If that fails, a [warn] is logged and its first statement returns [Closed].
-    Unread pipelined answers are drained when the borrow ends.
+    Unread pipelined answers are drained when the borrow ends. A row function
+    that raises while they are closes the connection, which still goes back and
+    is made again at the next lend, and its exception reaches the caller as it
+    was raised, unless [f] raised first.
 
     The wait is cancellable. [f] is shielded from Eio cancellation so it never
     stops mid-protocol; instead, cancelling cancels the running statement at the

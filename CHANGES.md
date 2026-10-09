@@ -5,6 +5,10 @@
 - Breaking: OCaml 5.5 or later is required. The opam files asked for 5.4,
   which CI tested and nothing else did; every switch the code is written
   in is 5.5.
+- A row function that raises while `Pool.use` drains its unread answers no
+  longer takes the connection out of the pool for good: the connection goes
+  back, is made again at the next lend, and the exception reaches the
+  caller as raised, not wrapped in `Fun.Finally_raised`.
 
 ## 0.1.0 (2026-10-06)
 

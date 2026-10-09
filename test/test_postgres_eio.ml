@@ -4144,6 +4144,30 @@ let a_pipeline_left_unread () =
       script t "drop table pgeio_unread");
   Pg.Pool.close p
 
+exception Row_bug
+
+(* A row function that raises while its answer is drained at give-back:
+   the caller sees that exception as raised, and the connection still goes
+   back, to be made again at the next lend. *)
+let a_row_function_that_raises_while_drained () =
+  with_eio @@ fun env sw ->
+  let p = pool env sw in
+  (match
+     Pg.Pool.use p (fun t ->
+         ignore
+           (Pg.Pipeline.query t "select 1" ~params:[] ~init:() ~row:(fun () _ ->
+                raise Row_bug)))
+   with
+  | exception Row_bug -> ()
+  | exception ex -> Alcotest.failf "raised %s" (Printexc.to_string ex)
+  | Ok () -> Alcotest.fail "the row function's exception was lost"
+  | Error `Busy -> Alcotest.fail "no connection");
+  Alcotest.(check int) "back in the pool" 1 (Pg.Pool.stats p).idle;
+  Alcotest.(check string)
+    "and lent again" "1"
+    (borrow p (fun t -> one t "select 1" []));
+  Pg.Pool.close p
+
 let leave_everything t =
   List.iter (script t)
     [
@@ -4637,6 +4661,8 @@ let pool_cases =
     Alcotest.test_case "a transaction left open is rolled back" `Quick
       a_transaction_left_open_is_rolled_back;
     Alcotest.test_case "a pipeline left unread" `Quick a_pipeline_left_unread;
+    Alcotest.test_case "a row function that raises while drained" `Quick
+      a_row_function_that_raises_while_drained;
     Alcotest.test_case "a borrower's session is not the next one's" `Quick
       a_borrowers_session_is_not_the_next_ones;
     Alcotest.test_case "reset false keeps the session" `Quick

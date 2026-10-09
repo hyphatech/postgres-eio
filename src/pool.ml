@@ -131,13 +131,21 @@ let ready e =
   | None -> ()
 
 (* Drained before [resume], while an abandoned borrower's statements are
-   still refused, so one queued but unsent is dropped, never sent. *)
+   still refused, so one queued but unsent is dropped, never sent. A row
+   function that raises while drained has closed the connection; it goes
+   back all the same, to be made again at the next lend, and its exception
+   is returned for the borrower to raise. *)
 let give_back t e =
-  ignore (C.Pipeline.drain e.conn : (unit, C.error) result);
+  let raised =
+    match C.Pipeline.drain e.conn with
+    | (_ : (unit, C.error) result) -> None
+    | exception ex -> Some (ex, Printexc.get_raw_backtrace ())
+  in
   C.resume e.conn;
   C.set_timeout e.conn ~timeout_s:t.timeout_s;
   if not (C.closed e.conn) then queue_reset t e;
-  back t e
+  back t e;
+  raised
 
 (* Housekeeping *)
 
@@ -326,16 +334,26 @@ let use ?wait_s t f =
   | Some e ->
       let given = now t in
       slow ~what:"a wait for a connection" ~over:wait_warn_ms asked given;
-      Ok
-        (Fun.protect
-           ~finally:(fun () ->
-             Eio.Cancel.protect (fun () ->
-                 slow ~what:"a borrowed connection" ~over:hold_warn_ms given
-                   (now t);
-                 give_back t e))
-           (fun () ->
-             ready e;
-             borrowed e.conn f))
+      let answer =
+        match
+          ready e;
+          borrowed e.conn f
+        with
+        | v -> Ok v
+        | exception ex -> Error (ex, Printexc.get_raw_backtrace ())
+      in
+      let raised =
+        Eio.Cancel.protect (fun () ->
+            slow ~what:"a borrowed connection" ~over:hold_warn_ms given (now t);
+            give_back t e)
+      in
+      (* What the borrower raised, a cancellation included, came first and
+         wins over what the drain raised. *)
+      begin match (answer, raised) with
+      | Error (ex, bt), _ | Ok _, Some (ex, bt) ->
+          Printexc.raise_with_backtrace ex bt
+      | Ok v, None -> Ok v
+      end
 
 (* Borrowed connections close when returned, not under a running
    transaction. *)
