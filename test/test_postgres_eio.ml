@@ -2189,11 +2189,14 @@ let cancelled env t =
 (* A fake server that trusts everyone. It answers SSLRequest with [ssl]
    ("N"; "E" then nothing; or "S" then non-TLS bytes), and StartupMessage
    with [before], AuthenticationOk, [reported] as ParameterStatus, and
-   ReadyForQuery. A Query is answered with what [on_query] returns for its
-   text. It counts connections. A CancelRequest is given to [on_cancel], and
-   its connection closed when that returns. *)
+   ReadyForQuery; but the [n]th StartupMessage, counted from 1, is answered
+   with [refuse n] and closed where that is some. A Query is answered with
+   what [on_query] returns for its text. It counts connections. A
+   CancelRequest is given to [on_cancel], and its connection closed when
+   that returns. *)
 let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
-    ?(on_query = fun _ -> "") ?(on_cancel = ignore) () =
+    ?(refuse = fun _ -> None) ?(on_query = fun _ -> "") ?(on_cancel = ignore) ()
+    =
   let listener =
     Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env)
       (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
@@ -2201,7 +2204,7 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
   let port =
     match Eio.Net.listening_addr listener with `Tcp (_, p) -> p | `Unix _ -> 0
   in
-  let taken = ref 0 in
+  let taken = ref 0 and startups = ref 0 in
   Eio.Fiber.fork_daemon ~sw (fun () ->
       Eio.Net.run_server listener ~on_error:ignore (fun flow _ ->
           incr taken;
@@ -2224,28 +2227,33 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
               && Int32.equal (String.get_int32_be body 0) 80877102l
             then on_cancel ()
             else begin
-              write
-                (before
-                ^ msg 'R' (int32 0)
-                ^ String.concat ""
-                    (List.map
-                       (fun (k, v) -> msg 'S' (cstr k ^ cstr v))
-                       reported)
-                ^ msg 'K' (int32 1 ^ "keys")
-                ^ msg 'Z' "I");
-              let rec until_terminate () =
-                match Eio.Buf_read.any_char r with
-                | 'X' -> ()
-                | 'Q' ->
-                    let body = Eio.Buf_read.take (take_int32 () - 4) r in
-                    write
-                      (on_query (String.sub body 0 (String.length body - 1)));
-                    until_terminate ()
-                | _ ->
-                    ignore (Eio.Buf_read.take (take_int32 () - 4) r);
-                    until_terminate ()
-              in
-              until_terminate ()
+              incr startups;
+              match refuse !startups with
+              | Some answer -> write answer
+              | None ->
+                  write
+                    (before
+                    ^ msg 'R' (int32 0)
+                    ^ String.concat ""
+                        (List.map
+                           (fun (k, v) -> msg 'S' (cstr k ^ cstr v))
+                           reported)
+                    ^ msg 'K' (int32 1 ^ "keys")
+                    ^ msg 'Z' "I");
+                  let rec until_terminate () =
+                    match Eio.Buf_read.any_char r with
+                    | 'X' -> ()
+                    | 'Q' ->
+                        let body = Eio.Buf_read.take (take_int32 () - 4) r in
+                        write
+                          (on_query
+                             (String.sub body 0 (String.length body - 1)));
+                        until_terminate ()
+                    | _ ->
+                        ignore (Eio.Buf_read.take (take_int32 () - 4) r);
+                        until_terminate ()
+                  in
+                  until_terminate ()
             end
           in
           try startup () with End_of_file | Eio.Io _ -> ()));
@@ -2826,6 +2834,31 @@ let a_cancelled_wait_keeps_listening () =
       ("over TLS", { (base ()) with ssl_mode = Require });
       ("in the clear", plain ());
     ]
+
+(* A server that restarts answers 57P03 while it starts up, and the listener
+   tries again with backoff. The fake never answers a heartbeat, so the
+   first connection is lost at once, and refuses the second sign-in. *)
+let a_server_starting_up_is_waited_for () =
+  with_eio @@ fun env sw ->
+  let starting_up =
+    msg 'E'
+      ("S" ^ cstr "FATAL" ^ "C" ^ cstr "57P03" ^ "M"
+      ^ cstr "the database system is starting up"
+      ^ "\000")
+  in
+  let port, _ =
+    a_fake_postgres env sw
+      ~refuse:(function 2 -> Some starting_up | _ -> None)
+      ~on_query:(fun sql ->
+        if String.starts_with ~prefix:"listen" sql then
+          msg 'C' (cstr "LISTEN") ^ msg 'Z' "I"
+        else "")
+      ()
+  in
+  let l = listener ~heartbeat_s:0.1 ~timeout_s:0.2 env sw (fake port) in
+  ok_pg (Pg.Listener.listen l "pgeio_restart");
+  reconnected env l;
+  Pg.Listener.close l
 
 (* A password changed while disconnected is returned, not retried. *)
 let a_refused_sign_in_is_returned () =
@@ -4079,6 +4112,8 @@ let connection_cases =
       a_quiet_listener_outlives_its_heartbeats;
     Alcotest.test_case "a cancelled wait keeps listening" `Quick
       a_cancelled_wait_keeps_listening;
+    Alcotest.test_case "a server starting up is waited for" `Quick
+      a_server_starting_up_is_waited_for;
     Alcotest.test_case "a refused sign-in is returned, not retried" `Quick
       a_refused_sign_in_is_returned;
     Alcotest.test_case "a payload past the limit" `Quick

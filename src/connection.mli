@@ -300,6 +300,8 @@ module Listener : sig
       noticed within heartbeat + timeout; no background fiber is used. A failed
       connection is reconnected, immediately then with backoff from 1 s to 30 s
       (each failure a [warn]), and {!event.Reconnected} is returned. A server
+      error of class 57P, which a restarting server answers with ([57P03],
+      starting up), is retried as a failed connection is; any other server
       refusal (sign-in, [LISTEN]) is returned as an error. After {!close},
       [Closed].
 

@@ -29,6 +29,11 @@
   closed it, so a loop racing `next` against a tick reconnected at every
   tick and lost what was sent meanwhile. Only the read after the socket is
   readable is shielded, and what it reads is kept for the next call.
+- Breaking: a `Listener` whose server is restarting waits for it: an error
+  of class 57P while it reconnects (57P03, the server starting up) is
+  retried with backoff, as a lost connection is, and no longer returned by
+  `next`. It ended the loop with the error, though the server would take
+  the sign-in a moment later. Any other server refusal is still returned.
 
 ## 0.1.0 (2026-10-06)
 

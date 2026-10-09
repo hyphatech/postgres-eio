@@ -2154,10 +2154,16 @@ module Listener = struct
 
   (* Transport failures retry with backoff (the server may be restarting):
      at once, then doubling from a second, so a restart is caught quickly,
-     up to half a minute, so a long outage is not hammered. A server refusal
-     is returned. *)
+     up to half a minute, so a long outage is not hammered. So does an error
+     of class 57P, which a restart answers with (57P01 shutting down, 57P03
+     starting up). Any other server refusal is returned. *)
   let first_retry_s = 1.
   let last_retry_s = 30.
+
+  let transient = function
+    | Timeout | Closed | Io _ | Protocol _ -> true
+    | Server e -> String.starts_with ~prefix:"57P" (Server_error.sqlstate e)
+    | Refused _ -> false
 
   let reconnect t =
     let again () =
@@ -2172,13 +2178,13 @@ module Listener = struct
     let rec attempt wait_s =
       match again () with
       | Ok () -> Ok Reconnected
-      | Error (Server _ | Refused _) as refused -> refused
-      | Error ((Timeout | Closed | Io _ | Protocol _) as e) ->
+      | Error e when transient e ->
           Log.warn (fun m ->
               m "a listener could not reconnect, and tries again in %gs: %s"
                 wait_s (error_to_string e));
           Eio.Time.Mono.sleep t.conn.clock wait_s;
           attempt (Float.min last_retry_s (wait_s *. 2.))
+      | Error e -> Error e
     in
     attempt first_retry_s
 
