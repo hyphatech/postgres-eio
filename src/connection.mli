@@ -282,8 +282,9 @@ module Listener : sig
     ?heartbeat_s:float ->
     Conninfo.t ->
     (t, error) result
-  (** Connects as {!Postgres_eio.connect}. [heartbeat_s] (10) is how long
-      {!next} waits in silence before pinging the server. *)
+  (** Connects as {!Postgres_eio.connect}. [heartbeat_s] (10) is how long the
+      listener goes without hearing from the server before pinging it, counted
+      across calls to {!next}. *)
 
   val listen : t -> string -> (unit, error) result
   (** [LISTEN], quoted: ["Jobs"] hears [pg_notify('Jobs', ...)], not an unquoted
@@ -307,7 +308,9 @@ module Listener : sig
 
       [next] can be raced against a timer: an Eio cancellation while it waits
       keeps the connection and its channels, and what arrives meanwhile is kept
-      for the next call. *)
+      for the next call. A tick shorter than the heartbeat does not put it off,
+      and a heartbeat under way when the cancellation comes is finished first,
+      within the timeout. *)
 
   val close : t -> unit
   (** Closes it for good; {!next} then returns [Closed]. *)

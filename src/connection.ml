@@ -2119,6 +2119,10 @@ module Listener = struct
     conn : conn;
     heard : notification Queue.t;
     heartbeat_s : float;
+    (* When the listener last heard the server, or last proved it alive: the
+       heartbeat counts from it across calls, since a loop racing [next]
+       against a shorter tick would otherwise never send one. *)
+    mutable heard_at : Mtime.t;
     (* For re-listening after reconnect. *)
     mutable channels : string list;
     mutable stopped : bool;
@@ -2130,7 +2134,15 @@ module Listener = struct
       ?(heartbeat_s = 10.) conninfo =
     let heard = Queue.create () in
     Result.map
-      (fun conn -> { conn; heard; heartbeat_s; channels = []; stopped = false })
+      (fun conn ->
+        {
+          conn;
+          heard;
+          heartbeat_s;
+          heard_at = now conn;
+          channels = [];
+          stopped = false;
+        })
       (open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache:0
          ~heard:(Some heard) conninfo)
 
@@ -2177,7 +2189,9 @@ module Listener = struct
     in
     let rec attempt wait_s =
       match again () with
-      | Ok () -> Ok Reconnected
+      | Ok () ->
+          t.heard_at <- now t.conn;
+          Ok Reconnected
       | Error e when transient e ->
           Log.warn (fun m ->
               m "a listener could not reconnect, and tries again in %gs: %s"
@@ -2195,7 +2209,9 @@ module Listener = struct
     reconnect t
 
   (* Buffered notifications first; after a silent heartbeat, an empty query
-   proves the server is alive. *)
+     proves the server is alive. The query is shielded, bounded by the
+     timeout: a tick that cut it short would close the connection, and a
+     loop racing [next] would reconnect at every heartbeat. *)
   let rec next t =
     if t.stopped then Error Closed
     else
@@ -2203,16 +2219,24 @@ module Listener = struct
       | Some n -> Ok (Notification n)
       | None when closed t.conn -> reconnect t
       | None -> (
-          match heard_within t.conn ~seconds:t.heartbeat_s with
+          let silent_s =
+            Mtime.Span.to_float_ns (Mtime.span t.heard_at (now t.conn)) /. 1e9
+          in
+          let seconds = Float.max 0. (t.heartbeat_s -. silent_s) in
+          match heard_within t.conn ~seconds with
           | Ok true ->
+              t.heard_at <- now t.conn;
               (* A caller cancelled during the shielded read leaves what
                  it read queued for its next call, rather than taking it
                  into an answer nobody receives. *)
               Eio.Fiber.check ();
               next t
           | Ok false -> (
-              match script t.conn "" with
-              | Ok () -> next t
+              match Eio.Cancel.protect (fun () -> script t.conn "") with
+              | Ok () ->
+                  t.heard_at <- now t.conn;
+                  Eio.Fiber.check ();
+                  next t
               | Error e -> lost t e)
           | Error e -> lost t e)
 

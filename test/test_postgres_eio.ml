@@ -2840,6 +2840,82 @@ let a_cancelled_wait_keeps_listening () =
       ("in the clear", plain ());
     ]
 
+(* Races [next] against a tick of [tick_s] until it returns, or fails after
+   [within] seconds. *)
+let raced env ~tick_s ?(within = 5.) l =
+  let clock = Eio.Stdenv.mono_clock env in
+  let rec loop () =
+    match
+      Eio.Fiber.first
+        (fun () -> Some (Pg.Listener.next l))
+        (fun () ->
+          Eio.Time.Mono.sleep clock tick_s;
+          None)
+    with
+    | None -> loop ()
+    | Some answer -> answer
+  in
+  Eio.Fiber.first loop (fun () ->
+      Eio.Time.Mono.sleep clock within;
+      Alcotest.failf "no event within %gs of a loop ticking every %gs" within
+        tick_s)
+
+(* A loop that races [next] against a tick shorter than the heartbeat still
+   sends one, since the heartbeat counts from the last byte heard, not from
+   each call: a server gone silent is noticed. The fake never answers a
+   heartbeat. *)
+let a_racing_loop_notices_a_silent_server () =
+  with_eio @@ fun env sw ->
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_query:(fun sql ->
+        if String.starts_with ~prefix:"listen" sql then
+          msg 'C' (cstr "LISTEN") ^ msg 'Z' "I"
+        else "")
+      ()
+  in
+  let l = listener ~heartbeat_s:0.2 ~timeout_s:0.2 env sw (fake port) in
+  ok_pg (Pg.Listener.listen l "pgeio_ticking");
+  (match raced env ~tick_s:0.05 l with
+  | Ok Pg.Listener.Reconnected -> ()
+  | Ok (Pg.Listener.Notification n) -> Alcotest.failf "heard %S" n.payload
+  | Error e -> Alcotest.failf "%s" (Pg.error_to_string e));
+  Pg.Listener.close l
+
+(* A heartbeat a tick cuts short is finished, not abandoned: abandoning it
+   would close the connection, and a racing loop would reconnect at every
+   heartbeat a slow server answers after the tick. *)
+let a_tick_does_not_cut_a_heartbeat () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let heartbeats = ref 0 in
+  let port, taken =
+    a_fake_postgres env sw
+      ~on_query:(fun sql ->
+        if String.starts_with ~prefix:"listen" sql then
+          msg 'C' (cstr "LISTEN") ^ msg 'Z' "I"
+        else begin
+          incr heartbeats;
+          Eio.Time.Mono.sleep clock 0.2;
+          msg 'I' "" ^ msg 'Z' "I"
+        end)
+      ()
+  in
+  let l = listener ~heartbeat_s:0.1 ~timeout_s:2. env sw (fake port) in
+  ok_pg (Pg.Listener.listen l "pgeio_slow");
+  Eio.Fiber.first
+    (fun () ->
+      match raced env ~tick_s:0.05 ~within:10. l with
+      | Ok Pg.Listener.Reconnected -> Alcotest.fail "reconnected"
+      | Ok (Pg.Listener.Notification n) -> Alcotest.failf "heard %S" n.payload
+      | Error e -> Alcotest.failf "%s" (Pg.error_to_string e))
+    (fun () -> Eio.Time.Mono.sleep clock 1.5);
+  if !heartbeats < 2 then
+    Alcotest.failf "%d heartbeats, where the loop should send several"
+      !heartbeats;
+  Alcotest.(check int) "one connection" 1 !taken;
+  Pg.Listener.close l
+
 (* A server that restarts answers 57P03 while it starts up, and the listener
    tries again with backoff. The fake never answers a heartbeat, so the
    first connection is lost at once, and refuses the second sign-in. *)
@@ -4117,6 +4193,10 @@ let connection_cases =
       a_quiet_listener_outlives_its_heartbeats;
     Alcotest.test_case "a cancelled wait keeps listening" `Quick
       a_cancelled_wait_keeps_listening;
+    Alcotest.test_case "a racing loop notices a silent server" `Quick
+      a_racing_loop_notices_a_silent_server;
+    Alcotest.test_case "a tick does not cut a heartbeat" `Quick
+      a_tick_does_not_cut_a_heartbeat;
     Alcotest.test_case "a server starting up is waited for" `Quick
       a_server_starting_up_is_waited_for;
     Alcotest.test_case "a refused sign-in is returned, not retried" `Quick

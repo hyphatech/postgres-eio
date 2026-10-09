@@ -29,6 +29,12 @@
   closed it, so a loop racing `next` against a tick reconnected at every
   tick and lost what was sent meanwhile. Only the read after the socket is
   readable is shielded, and what it reads is kept for the next call.
+- A loop racing `Listener.next` against a tick shorter than `heartbeat_s`
+  sends its heartbeats, and notices a dead server within heartbeat +
+  timeout. Each `next` counted the heartbeat from its own start, so such a
+  loop never sent one. The heartbeat now counts from the last time the
+  listener heard the server, and one under way when `next` is cancelled is
+  finished, within the timeout, rather than closing the connection.
 - Breaking: a `Listener` whose server is restarting waits for it: an error
   of class 57P while it reconnects (57P03, the server starting up) is
   retried with backoff, as a lost connection is, and no longer returned by
