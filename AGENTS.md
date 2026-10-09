@@ -20,10 +20,14 @@ output says so. CI runs `make lint` and `make test` on OCaml 5.5.
 
 ```
 src/                 the library; every module has an .mli
+  postgres_eio       the entry point: the connection, and the modules users reach
   protocol           messages to and from bytes, no IO
+  server_error, tag  a server's error and a statement's command tag, no IO
   auth, saslprep     SCRAM-SHA-256 and MD5, no IO
   conninfo           connection strings, the PG* variables, .pgpass, no IO
+  column, oid        a result's columns, and the identifiers of their types
   text, value        cell encoding and decoding, text and binary
+  interval, instant  intervals, and instants between microseconds and Ptime
   connection         a connection: TLS, sign-in, statements, COPY, LISTEN
   pool               a fixed-size pool
 test/
@@ -65,7 +69,8 @@ Each rule comes with why it exists and the test that catches a break.
   shared by every borrower. Tests: `a borrower's session is not the next
   one's`, `a transaction left open is rolled back`.
 - **Only a `Listener` keeps notifications; a pooled connection never
-  listens.** Every give-back sends `UNLISTEN *`, with `~reset:false` too.
+  listens.** Every give-back sends `UNLISTEN *` but on a standby, which
+  cannot listen, with `~reset:false` too.
   Why: a notification belongs to the session that asked for it, not to
   whoever borrows the connection next, and an idle pooled connection reads
   nothing, so one left listening fills the server's notification queue.

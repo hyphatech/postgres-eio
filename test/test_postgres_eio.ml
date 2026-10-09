@@ -4395,10 +4395,6 @@ let an_abandoned_statement_is_stopped_at_the_server () =
       Alcotest.(check string) "and taking statements" "1" (one t "select 1" []));
   Pg.Pool.close p
 
-(* A borrower cancelled while its work waits on something other than the
-   server returns at the cancellation, not when the work would have ended.
-   Its connection is closed and made again, so the next borrower finds
-   nothing of it. *)
 (* A borrower that lifted its connection's timeout and is cancelled
    between exchanges is not held by a cancel request the server never
    closes: the request has the pool's timeout. The fake lets go after
@@ -4430,6 +4426,10 @@ let a_cancelled_borrower_is_not_held_by_its_cancel () =
     (fun () -> Eio.Time.Mono.sleep clock 0.2);
   Alcotest.(check bool) "returned before the server let go" false !let_go
 
+(* A borrower cancelled while its work waits on something other than the
+   server returns at the cancellation, not when the work would have ended.
+   Its connection is closed and made again, so the next borrower finds
+   nothing of it. *)
 let a_cancelled_borrower_returns_at_the_cancellation () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
