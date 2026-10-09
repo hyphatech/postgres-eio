@@ -161,7 +161,9 @@ let rec follow listener =
 
 A `Listener` is its own connection. It detects a dead server with a
 heartbeat, reconnects with backoff and listens again, and returns
-`Reconnected` because notifications sent meanwhile are lost.
+`Reconnected` because notifications sent meanwhile are lost. `next` can
+be raced against a timer: a cancelled wait keeps the connection and loses
+nothing.
 
 ## Performance
 

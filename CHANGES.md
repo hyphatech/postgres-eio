@@ -25,6 +25,10 @@
   the end of the listener's own answer (a `LISTEN`, or the heartbeat's
   empty query) at once. It waited for the next heartbeat, ten seconds by
   default, though the notification was already read.
+- Cancelling `Listener.next` while it waits keeps the connection. It
+  closed it, so a loop racing `next` against a tick reconnected at every
+  tick and lost what was sent meanwhile. Only the read after the socket is
+  readable is shielded, and what it reads is kept for the next call.
 
 ## 0.1.0 (2026-10-06)
 

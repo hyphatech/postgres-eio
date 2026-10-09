@@ -2050,48 +2050,59 @@ let notify t ~channel payload =
    timeout. Without a descriptor, a plain socket is read under the bound;
    a TLS one waits unbounded. Bytes already read are parsed first: a
    notification read with the last reply is in them, and the socket may
-   stay silent until the next heartbeat. *)
+   stay silent until the next heartbeat.
+
+   Readiness is awaited outside the exchange, since it reads nothing: a
+   cancellation there keeps the connection, and the usual loop races this
+   wait against a tick. The read after readiness is shielded, so it is
+   never cut off midway. *)
 let heard_within t ~seconds =
-  run t (fun link ->
-      drive t link;
-      unsolicited t link;
-      let within f =
-        match
-          Eio.Time.Timeout.run (Eio.Time.Timeout.seconds t.clock seconds) f
-        with
-        | Ok n -> Some n
-        | Error `Timeout -> None
-      in
-      let took n =
-        P.feed link.reader (Cstruct.sub link.buf 0 n);
+  let within f =
+    match Eio.Time.Timeout.run (Eio.Time.Timeout.seconds t.clock seconds) f with
+    | Ok n -> Some n
+    | Error `Timeout -> None
+  in
+  let took link n =
+    P.feed link.reader (Cstruct.sub link.buf 0 n);
+    unsolicited t link;
+    Ok true
+  in
+  let read link =
+    waited t link (fun () -> Eio.Flow.single_read link.flow link.buf)
+  in
+  let buffered () =
+    match t.heard with Some q -> not (Queue.is_empty q) | None -> false
+  in
+  match
+    run t (fun link ->
+        drive t link;
         unsolicited t link;
-        Ok true
-      in
-      let read () =
-        waited t link (fun () -> Eio.Flow.single_read link.flow link.buf)
-      in
-      let buffered =
-        match t.heard with Some q -> not (Queue.is_empty q) | None -> false
-      in
-      if buffered then Ok true
-      else
-        match Eio_unix.Resource.fd_opt link.socket with
-        | Some fd -> (
-            match
-              within (fun () ->
-                  Eio_unix.Fd.use_exn "heard_within" fd Eio_unix.await_readable;
-                  Ok ())
-            with
-            | None -> Ok false
-            | Some () -> took (read ()))
-        | None when not link.secure -> (
-            match
-              within (fun () ->
-                  Ok (guard (fun () -> Eio.Flow.single_read link.flow link.buf)))
-            with
-            | None -> Ok false
-            | Some n -> took n)
-        | None -> took (read ()))
+        Ok link)
+  with
+  | Error e -> Error e
+  | Ok _ when buffered () -> Ok true
+  | Ok link -> (
+      match Eio_unix.Resource.fd_opt link.socket with
+      | Some fd -> (
+          match
+            within (fun () ->
+                Eio_unix.Fd.use_exn "heard_within" fd Eio_unix.await_readable;
+                Ok ())
+          with
+          | None -> Ok false
+          | Some () ->
+              Eio.Cancel.protect (fun () ->
+                  run t (fun link -> took link (read link))))
+      | None when not link.secure ->
+          run t (fun link ->
+              match
+                within (fun () ->
+                    Ok
+                      (guard (fun () -> Eio.Flow.single_read link.flow link.buf)))
+              with
+              | None -> Ok false
+              | Some n -> took link n)
+      | None -> run t (fun link -> took link (read link)))
 
 module Listener = struct
   type conn = t
@@ -2187,7 +2198,12 @@ module Listener = struct
       | None when closed t.conn -> reconnect t
       | None -> (
           match heard_within t.conn ~seconds:t.heartbeat_s with
-          | Ok true -> next t
+          | Ok true ->
+              (* A caller cancelled during the shielded read leaves what
+                 it read queued for its next call, rather than taking it
+                 into an answer nobody receives. *)
+              Eio.Fiber.check ();
+              next t
           | Ok false -> (
               match script t.conn "" with
               | Ok () -> next t

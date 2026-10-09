@@ -2799,6 +2799,34 @@ let a_quiet_listener_outlives_its_heartbeats () =
       ("in the clear", plain ());
     ]
 
+(* The usual loop races [next] against a tick. A [next] cancelled while it
+   waits keeps the connection and what it listens to, so a notification
+   sent after is heard, not lost to a reconnection. *)
+let a_cancelled_wait_keeps_listening () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  List.iter
+    (fun (said, c) ->
+      let l = listener env sw c in
+      ok_pg (Pg.Listener.listen l "pgeio_raced");
+      Eio.Fiber.first
+        (fun () ->
+          match Pg.Listener.next l with
+          | Ok _ -> Alcotest.failf "%s: an event before any was sent" said
+          | Error e -> Alcotest.failf "%s: %s" said (Pg.error_to_string e))
+        (fun () -> Eio.Time.Mono.sleep clock 0.1);
+      let n = connect env sw (plain ()) in
+      notify n "pgeio_raced" "after";
+      Alcotest.(check string)
+        (said ^ ": heard after the cancelled wait")
+        "after" (heard env l).payload;
+      Pg.Listener.close l;
+      Pg.close n)
+    [
+      ("over TLS", { (base ()) with ssl_mode = Require });
+      ("in the clear", plain ());
+    ]
+
 (* A password changed while disconnected is returned, not retried. *)
 let a_refused_sign_in_is_returned () =
   with_eio @@ fun env sw ->
@@ -4049,6 +4077,8 @@ let connection_cases =
       a_silent_network_is_found;
     Alcotest.test_case "a quiet listener outlives its heartbeats" `Quick
       a_quiet_listener_outlives_its_heartbeats;
+    Alcotest.test_case "a cancelled wait keeps listening" `Quick
+      a_cancelled_wait_keeps_listening;
     Alcotest.test_case "a refused sign-in is returned, not retried" `Quick
       a_refused_sign_in_is_returned;
     Alcotest.test_case "a payload past the limit" `Quick

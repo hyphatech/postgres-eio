@@ -301,7 +301,11 @@ module Listener : sig
       connection is reconnected, immediately then with backoff from 1 s to 30 s
       (each failure a [warn]), and {!event.Reconnected} is returned. A server
       refusal (sign-in, [LISTEN]) is returned as an error. After {!close},
-      [Closed]. *)
+      [Closed].
+
+      [next] can be raced against a timer: an Eio cancellation while it waits
+      keeps the connection and its channels, and what arrives meanwhile is kept
+      for the next call. *)
 
   val close : t -> unit
   (** Closes it for good; {!next} then returns [Closed]. *)
