@@ -244,7 +244,9 @@ val set_timeout : t -> timeout_s:float option -> unit
 
 val abandon : t -> (unit, error) result
 (** From another fiber, cancels the running statement and refuses later ones
-    with [Refused] until {!resume}. For a lender whose borrower went away. *)
+    with [Refused] until {!resume}. For a lender whose borrower went away. The
+    cancel request is given 5 s, or the connection's timeout if that is shorter,
+    even when the timeout is lifted. *)
 
 val resume : t -> unit
 (** Accepts statements again after {!abandon}. *)

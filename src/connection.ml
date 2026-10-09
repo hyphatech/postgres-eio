@@ -1025,21 +1025,25 @@ let abandoned =
    more. *)
 let cancel_request_s = 5.
 
-(* 54.2.8: a timeout or a cancellation leaves the statement running at the
-   server, which would run it to its end for nobody, so it is cancelled
-   there as the connection closes. The request is shielded, since a
-   cancelled caller is one it is sent for, so it has a bound of its own:
-   the connection's timeout may be lifted, and a caller whose wait was
-   given up is not made to wait as long again. *)
-let stop t e =
-  break t e;
+(* A cancel the driver sends for a caller already given up on, which may
+   be shielded, has a bound of its own: the connection's timeout may be
+   lifted, and that caller is not made to wait as long again. *)
+let cancel_given_up t =
   let within =
     match t.timeout_s with
     | Some s -> Float.min s cancel_request_s
     | None -> cancel_request_s
   in
+  send_cancel t ~within:(Some within)
+
+(* 54.2.8: a timeout or a cancellation leaves the statement running at the
+   server, which would run it to its end for nobody, so it is cancelled
+   there as the connection closes, shielded, since a cancelled caller is
+   one it is sent for. *)
+let stop t e =
+  break t e;
   Eio.Cancel.protect (fun () ->
-      ignore (send_cancel t ~within:(Some within) : (unit, error) result))
+      ignore (cancel_given_up t : (unit, error) result))
 
 (* [sending] false: only reads, allowed even while refusing statements. *)
 let run ?(sending = true) t f =
@@ -2003,7 +2007,7 @@ let set_timeout t ~timeout_s = t.timeout_s <- timeout_s
 
 let abandon t =
   t.refusing <- true;
-  cancel t
+  cancel_given_up t
 
 let resume t = t.refusing <- false
 

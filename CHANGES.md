@@ -56,6 +56,10 @@
   constructor of `Pool.error`, at once, and so does a borrow waiting when
   the pool closes. It waited out `wait_s`, logged that no connection came
   free, and returned `` `Busy ``, though none ever would.
+- `abandon`'s cancel request has 5 s, or the timeout if that is shorter,
+  as a timeout's does. It had the connection's timeout alone, so with the
+  timeout lifted, as a migration lifts it, a server that never closed the
+  request's connection held the lender forever.
 
 ## 0.1.0 (2026-10-06)
 

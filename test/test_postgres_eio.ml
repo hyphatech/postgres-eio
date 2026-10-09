@@ -2525,6 +2525,25 @@ let a_cancel_request_left_unanswered_is_given_up () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool) "and returned before the server let go" false !let_go
 
+(* The same bound holds for [abandon], called by a lender whose borrower
+   went away, perhaps shielded, and on a connection whose timeout may be
+   lifted. *)
+let an_abandon_left_unanswered_is_given_up () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let held = 30. and let_go = ref false in
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_cancel:(fun () ->
+        Eio.Time.Mono.sleep clock held;
+        let_go := true)
+      ()
+  in
+  let t = connect env sw (fake port) in
+  Pg.set_timeout t ~timeout_s:None;
+  ignore (Eio.Cancel.protect (fun () -> Pg.abandon t) : (unit, Pg.error) result);
+  Alcotest.(check bool) "returned before the server let go" false !let_go
+
 (* target_session_attrs: read-write skips a standby; standby finds one. *)
 let the_kind_of_host_asked_for () =
   with_eio @@ fun env sw ->
@@ -4195,6 +4214,8 @@ let connection_cases =
       `Quick a_cancelled_exchange_is_cancelled_at_the_server;
     Alcotest.test_case "54.2.8 a cancel request left unanswered is given up"
       `Quick a_cancel_request_left_unanswered_is_given_up;
+    Alcotest.test_case "54.2.8 an abandon left unanswered is given up" `Quick
+      an_abandon_left_unanswered_is_given_up;
     Alcotest.test_case "a reset keeps its parameters" `Quick
       a_reset_keeps_its_parameters;
     Alcotest.test_case "a silent server times out" `Quick
