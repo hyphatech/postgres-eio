@@ -2189,10 +2189,11 @@ let cancelled env t =
 (* A fake server that trusts everyone. It answers SSLRequest with [ssl]
    ("N"; "E" then nothing; or "S" then non-TLS bytes), and StartupMessage
    with [before], AuthenticationOk, [reported] as ParameterStatus, and
-   ReadyForQuery. It counts connections. A CancelRequest is given to
-   [on_cancel], and its connection closed when that returns. *)
+   ReadyForQuery. A Query is answered with what [on_query] returns for its
+   text. It counts connections. A CancelRequest is given to [on_cancel], and
+   its connection closed when that returns. *)
 let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
-    ?(on_cancel = ignore) () =
+    ?(on_query = fun _ -> "") ?(on_cancel = ignore) () =
   let listener =
     Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env)
       (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
@@ -2235,6 +2236,11 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
               let rec until_terminate () =
                 match Eio.Buf_read.any_char r with
                 | 'X' -> ()
+                | 'Q' ->
+                    let body = Eio.Buf_read.take (take_int32 () - 4) r in
+                    write
+                      (on_query (String.sub body 0 (String.length body - 1)));
+                    until_terminate ()
                 | _ ->
                     ignore (Eio.Buf_read.take (take_int32 () - 4) r);
                     until_terminate ()
@@ -2817,6 +2823,28 @@ let a_refused_sign_in_is_returned () =
   | Error e -> Alcotest.failf "not the refusal: %s" (Pg.error_to_string e));
   Pg.Listener.close l;
   Pg.close admin
+
+(* 54.2.7: a NotificationResponse may follow the ReadyForQuery that ends a
+   listener's own answer, in the same read. It is heard at once: the fake
+   never answers a heartbeat, so a listener that waited for one would time
+   out and reconnect before hearing it. *)
+let a_notification_read_with_an_answer () =
+  with_eio @@ fun env sw ->
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_query:(fun sql ->
+        if String.starts_with ~prefix:"listen" sql then
+          msg 'C' (cstr "LISTEN")
+          ^ msg 'Z' "I"
+          ^ msg 'A' (int32 7 ^ cstr "pgeio_along" ^ cstr "along")
+        else "")
+      ()
+  in
+  let l = listener ~heartbeat_s:0.1 ~timeout_s:0.1 env sw (fake port) in
+  ok_pg (Pg.Listener.listen l "pgeio_along");
+  Alcotest.(check string)
+    "heard before any heartbeat" "along" (heard env l).payload;
+  Pg.Listener.close l
 
 let a_payload_past_the_limit () =
   with_eio @@ fun env sw ->
@@ -4025,6 +4053,8 @@ let connection_cases =
       a_refused_sign_in_is_returned;
     Alcotest.test_case "a payload past the limit" `Quick
       a_payload_past_the_limit;
+    Alcotest.test_case "54.2.7 a notification read with an answer" `Quick
+      a_notification_read_with_an_answer;
     Alcotest.test_case "54.2.3 a statement is parsed once" `Quick
       a_statement_is_parsed_once;
     Alcotest.test_case "54.2.3 the cache is sized, or off" `Quick

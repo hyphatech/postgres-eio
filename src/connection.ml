@@ -2048,10 +2048,13 @@ let notify t ~channel payload =
    and raises it on the next write, so a TLS listener would fail at its
    first silence. Once bytes arrive, the read runs under the normal
    timeout. Without a descriptor, a plain socket is read under the bound;
-   a TLS one waits unbounded. *)
+   a TLS one waits unbounded. Bytes already read are parsed first: a
+   notification read with the last reply is in them, and the socket may
+   stay silent until the next heartbeat. *)
 let heard_within t ~seconds =
   run t (fun link ->
       drive t link;
+      unsolicited t link;
       let within f =
         match
           Eio.Time.Timeout.run (Eio.Time.Timeout.seconds t.clock seconds) f
@@ -2067,23 +2070,28 @@ let heard_within t ~seconds =
       let read () =
         waited t link (fun () -> Eio.Flow.single_read link.flow link.buf)
       in
-      match Eio_unix.Resource.fd_opt link.socket with
-      | Some fd -> (
-          match
-            within (fun () ->
-                Eio_unix.Fd.use_exn "heard_within" fd Eio_unix.await_readable;
-                Ok ())
-          with
-          | None -> Ok false
-          | Some () -> took (read ()))
-      | None when not link.secure -> (
-          match
-            within (fun () ->
-                Ok (guard (fun () -> Eio.Flow.single_read link.flow link.buf)))
-          with
-          | None -> Ok false
-          | Some n -> took n)
-      | None -> took (read ()))
+      let buffered =
+        match t.heard with Some q -> not (Queue.is_empty q) | None -> false
+      in
+      if buffered then Ok true
+      else
+        match Eio_unix.Resource.fd_opt link.socket with
+        | Some fd -> (
+            match
+              within (fun () ->
+                  Eio_unix.Fd.use_exn "heard_within" fd Eio_unix.await_readable;
+                  Ok ())
+            with
+            | None -> Ok false
+            | Some () -> took (read ()))
+        | None when not link.secure -> (
+            match
+              within (fun () ->
+                  Ok (guard (fun () -> Eio.Flow.single_read link.flow link.buf)))
+            with
+            | None -> Ok false
+            | Some n -> took n)
+        | None -> took (read ()))
 
 module Listener = struct
   type conn = t

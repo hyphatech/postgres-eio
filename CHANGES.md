@@ -21,6 +21,10 @@
   that is shorter, and a pool's cancelled borrower's has the pool's
   timeout: with the timeout lifted, a server that never closed the
   request's connection held the caller forever.
+- `Listener.next` returns a notification that arrived in the same read as
+  the end of the listener's own answer (a `LISTEN`, or the heartbeat's
+  empty query) at once. It waited for the next heartbeat, ten seconds by
+  default, though the notification was already read.
 
 ## 0.1.0 (2026-10-06)
 
