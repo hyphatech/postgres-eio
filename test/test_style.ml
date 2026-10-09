@@ -3,7 +3,8 @@
 
 let src = "../src"
 
-(* An identifier, dotted path included, and the reason it is refused. *)
+(* An identifier, dotted path included and [Stdlib.] taken off, and the
+   reason it is refused. *)
 let banned =
   [
     ("failwith", "errors are values: return a result");
@@ -16,22 +17,40 @@ let banned =
     ("List.nth", "partial: use List.nth_opt");
     ("Obj.magic", "unsafe");
     ("compare", "polymorphic: use Int.compare, String.compare, ...");
-    ("Stdlib.compare", "polymorphic: use Int.compare, String.compare, ...");
     ("open", "use a module alias, not open");
     ("Sys.getenv", "the driver reads no environment: Conninfo.environment");
     ("Sys.getenv_opt", "the driver reads no environment: Conninfo.environment");
     ("Unix.getenv", "the driver reads no environment: Conninfo.environment");
     ("Unix.environment", "the driver reads no environment");
-    ("print_string", "a library never prints: log through Logs");
-    ("print_endline", "a library never prints: log through Logs");
-    ("prerr_string", "a library never prints: log through Logs");
-    ("prerr_endline", "a library never prints: log through Logs");
-    ("Printf.printf", "a library never prints: log through Logs");
-    ("Printf.eprintf", "a library never prints: log through Logs");
-    ("Format.printf", "a library never prints: log through Logs");
-    ("Format.eprintf", "a library never prints: log through Logs");
     ("exit", "a library never exits");
   ]
+  @ List.map
+      (fun name -> (name, "a library never prints: log through Logs"))
+      [
+        "print_string";
+        "print_endline";
+        "print_bytes";
+        "print_char";
+        "print_int";
+        "print_float";
+        "print_newline";
+        "prerr_string";
+        "prerr_endline";
+        "prerr_bytes";
+        "prerr_char";
+        "prerr_int";
+        "prerr_float";
+        "prerr_newline";
+        "stdout";
+        "stderr";
+        "Printf.printf";
+        "Printf.eprintf";
+        "Format.printf";
+        "Format.eprintf";
+        "Format.print_string";
+        "Format.std_formatter";
+        "Format.err_formatter";
+      ]
 
 let read path = In_channel.with_open_bin path In_channel.input_all
 
@@ -159,19 +178,87 @@ let sources suffix =
   |> List.filter (String.ends_with ~suffix)
   |> List.sort String.compare
 
+(* A name is read with a leading [Stdlib.] taken off, so [Stdlib.exit] is
+   [exit]. *)
+let unqualified word =
+  match String.starts_with ~prefix:"Stdlib." word with
+  | true -> String.sub word 7 (String.length word - 7)
+  | false -> word
+
+(* Each banned identifier in [source], a file's text, as a line naming it. *)
+let banned_in file source =
+  identifiers (code_of source)
+  |> List.map (fun (line, word) -> (line, unqualified word))
+  |> List.filter_map (fun (line, word) ->
+      List.assoc_opt word banned
+      |> Option.map (fun why ->
+          Printf.sprintf "src/%s:%d: %s -- %s" file line word why))
+
 let no_banned_identifier () =
   let found =
     List.concat_map
-      (fun file ->
-        let code = code_of (read (Filename.concat src file)) in
-        identifiers code
-        |> List.filter_map (fun (line, word) ->
-            List.assoc_opt word banned
-            |> Option.map (fun why ->
-                Printf.sprintf "src/%s:%d: %s -- %s" file line word why)))
+      (fun file -> banned_in file (read (Filename.concat src file)))
       (sources ".ml" @ sources ".mli")
   in
   Alcotest.(check (list string)) "banned identifiers" [] found
+
+(* What OCAML.md's "Tests are Alcotest" says every library refuses, word for
+   word: each is refused, bare and behind [Stdlib.]. *)
+let shared_refusals =
+  [
+    "failwith";
+    "invalid_arg";
+    "Option.get";
+    "Result.get_ok";
+    "Result.get_error";
+    "List.hd";
+    "List.tl";
+    "List.nth";
+    "Obj.magic";
+    "compare";
+    "Stdlib.compare";
+    "Sys.getenv";
+    "Sys.getenv_opt";
+    "Unix.getenv";
+    "Unix.environment";
+    "exit";
+    "print_string";
+    "print_endline";
+    "print_bytes";
+    "print_char";
+    "print_int";
+    "print_float";
+    "print_newline";
+    "prerr_string";
+    "prerr_endline";
+    "prerr_bytes";
+    "prerr_char";
+    "prerr_int";
+    "prerr_float";
+    "prerr_newline";
+    "stdout";
+    "stderr";
+    "Printf.printf";
+    "Printf.eprintf";
+    "Format.printf";
+    "Format.eprintf";
+    "Format.print_string";
+    "Format.std_formatter";
+    "Format.err_formatter";
+  ]
+
+let every_shared_refusal () =
+  let missed =
+    List.concat_map
+      (fun name ->
+        match String.starts_with ~prefix:"Stdlib." name with
+        | true -> [ name ]
+        | false -> [ name; "Stdlib." ^ name ])
+      shared_refusals
+    |> List.filter (fun name ->
+        List.is_empty (banned_in "row.ml" ("let _ = " ^ name)))
+  in
+  Alcotest.(check (list string)) "names let through" [] missed
 
 let no_silenced_warning () =
   let found =
@@ -210,6 +297,7 @@ let () =
       ( "src",
         [
           Alcotest.test_case "no banned identifier" `Quick no_banned_identifier;
+          Alcotest.test_case "every shared refusal" `Quick every_shared_refusal;
           Alcotest.test_case "no silenced warning" `Quick no_silenced_warning;
           Alcotest.test_case "every module has an interface" `Quick
             every_module_has_an_interface;
