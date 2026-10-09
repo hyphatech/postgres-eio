@@ -1,6 +1,6 @@
 # AGENTS.md
 
-postgres-eio is a native Postgres driver for OCaml 5 and Eio. This file is
+The postgres-eio library is a native Postgres driver for OCaml 5 and Eio. This file is
 for anyone changing it, human or agent. Users start at [README.md](README.md).
 
 ## Commands
@@ -47,7 +47,7 @@ Each rule comes with why it exists and the test that catches a break.
   its section** of chapter 54 of the Postgres 18 docs (e.g. `54.2.4 ...`).
   Backend messages are read whole, a byte at a time, and at generated
   splits. Why: review by example misses the requirement nobody thought
-  of.
+  of. Test: the cases of that name in `test_postgres_eio`.
 - **The driver reads only what the connection string names, unless the
   caller hands it more.** Files only from `sslrootcert`, `sslcert` and
   `sslkey`. The system CAs only for a verified mode with no `sslrootcert`.
@@ -60,13 +60,13 @@ Each rule comes with why it exists and the test that catches a break.
   COPY and a listener's wait read only once the queue is empty. While
   writing, every reply is read, because the server stops reading while its
   answers wait. Why: otherwise one statement's answer is read as another's,
-  or both sides deadlock. Tests: `54.2.4 answers asked for out of order`,
+  or both sides deadlock. Test: `54.2.4 answers asked for out of order`,
   `54.2.4 longer than the buffers, and no deadlock`.
 - **A pooled connection is lent in a clean state**: no transaction, no
   session state, its original timeout. The reset is queued at give-back and
   read at the next lend, never awaited at give-back. It is `DISCARD ALL`
   minus `DEALLOCATE ALL` and `DISCARD PLANS`, because the statement cache is
-  shared by every borrower. Tests: `a borrower's session is not the next
+  shared by every borrower. Test: `a borrower's session is not the next
   one's`, `a transaction left open is rolled back`.
 - **Only a `Listener` keeps notifications; a pooled connection never
   listens.** Every give-back sends `UNLISTEN *` but on a standby, which
@@ -79,7 +79,7 @@ Each rule comes with why it exists and the test that catches a break.
   SCRAM exchange or message bytes, at any level. The exception is a server
   error's message, returned as the server wrote it, which can quote a value
   that failed its cast (class 22). The TLS library's own `tls.tracing` and
-  `handshake` sources are the application's to cap. Tests: `no secret in
+  `handshake` sources are the application's to cap. Test: `no secret in
   the log`, `a bad escape in a password is not quoted`, `a delimiter in a
   password is not quoted`.
 - **The driver's own failures are values; only the caller's exceptions
@@ -89,7 +89,7 @@ Each rule comes with why it exists and the test that catches a break.
   as they came. A failure that leaves the stream out of step (timeout,
   broken socket, malformed bytes, a raise from a row function) closes the
   connection. A server error does not, since the server marks where its
-  reply ends. Tests: `54.2.3 a server's error keeps the connection`,
+  reply ends. Test: `54.2.3 a server's error keeps the connection`,
   `54.2.6 a producer that raises is a CopyFail`.
 
 ## House style

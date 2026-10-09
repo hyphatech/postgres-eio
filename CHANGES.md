@@ -59,7 +59,7 @@
   to a borrow waiting when the pool closes. A closed pool waited out
   `wait_s`, logged that no connection came free, and returned `` `Busy ``,
   though none ever would.
-- `abandon`'s cancel request has 5 s, or the timeout if that is shorter,
+- The cancel request of `abandon` has 5 s, or the timeout if that is shorter,
   as a timeout's does. It had the connection's timeout alone, so with the
   timeout lifted, as a migration lifts it, a server that never closed the
   request's connection held the lender forever.
