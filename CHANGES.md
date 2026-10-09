@@ -1,5 +1,11 @@
 # Changes
 
+## Unreleased
+
+- Breaking: OCaml 5.5 or later is required. The opam files asked for 5.4,
+  which CI tested and nothing else did; every switch the code is written
+  in is 5.5.
+
 ## 0.1.0 (2026-10-06)
 
 First release.

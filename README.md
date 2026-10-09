@@ -3,7 +3,7 @@
 [![ci](https://img.shields.io/github/actions/workflow/status/hyphatech/postgres-eio/ci.yml?branch=main&label=ci)](https://github.com/hyphatech/postgres-eio/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/hyphatech/postgres-eio?label=release)](https://github.com/hyphatech/postgres-eio/releases)
 [![license](https://img.shields.io/github/license/hyphatech/postgres-eio)](LICENSE)
-![OCaml 5.4+](https://img.shields.io/badge/OCaml-5.4%2B-EC6813?logo=ocaml&logoColor=white)
+![OCaml 5.5+](https://img.shields.io/badge/OCaml-5.5%2B-EC6813?logo=ocaml&logoColor=white)
 ![tested on PostgreSQL 18](https://img.shields.io/badge/tested%20on-PostgreSQL%2018-336791?logo=postgresql&logoColor=white)
 
 A native Postgres driver for OCaml 5 and Eio.

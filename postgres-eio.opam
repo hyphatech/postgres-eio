@@ -10,7 +10,7 @@ homepage: "https://github.com/hyphatech/postgres-eio"
 bug-reports: "https://github.com/hyphatech/postgres-eio/issues"
 depends: [
   "dune" {>= "3.18"}
-  "ocaml" {>= "5.4"}
+  "ocaml" {>= "5.5"}
   "eio" {>= "1.5"}
   "tls" {>= "2.1.2"}
   "tls-eio" {>= "2.1.2"}

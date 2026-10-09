@@ -21,7 +21,7 @@
   "Protocol 3.0 and 3.2 over TCP, a Unix socket or TLS; SCRAM with channel binding, MD5 and client certificates; statements cached and pipelined, COPY both ways, LISTEN/NOTIFY, binary results and a pool, every failure a value.")
  (depends
   (ocaml
-   (>= 5.4))
+   (>= 5.5))
   (eio
    (>= 1.5))
   (tls

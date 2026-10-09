@@ -14,7 +14,7 @@ make fmt     # format in place
 
 `make test` needs `docker compose`. Without
 `POSTGRES_EIO_TEST_PG` the cases that need a server are skipped, and the test
-output says so. CI runs `make lint` and `make test` on OCaml 5.4 and 5.5.
+output says so. CI runs `make lint` and `make test` on OCaml 5.5.
 
 ## Layout
 
