@@ -57,10 +57,13 @@ val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy ]) result
     is made again at the next lend, and its exception reaches the caller as it
     was raised, unless [f] raised first.
 
-    The wait is cancellable. [f] is shielded from Eio cancellation so it never
-    stops mid-protocol; instead, cancelling cancels the running statement at the
-    server and refuses later ones ({!Postgres_eio.abandon}), so [f] fails fast
-    and its transaction rolls back.
+    The wait is cancellable, and so is [f]: an Eio cancellation stops [f] at
+    whatever it is waiting on, the server or anything else, and propagates from
+    [use] at once. The connection then goes back closed, to be made again at the
+    next lend: its running statement is first cancelled at the server
+    ({!Postgres_eio.cancel}, bounded by the connection's timeout), its
+    transaction rolls back, and statements it queued but had not sent are never
+    sent. Only that give-back is shielded from the cancellation.
 
     Waits over 100 ms and borrows held over 250 ms log a [warn] on
     [postgres-eio.pool]. *)

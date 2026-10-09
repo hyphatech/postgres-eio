@@ -4067,7 +4067,40 @@ let an_abandoned_statement_is_stopped_at_the_server () =
       Alcotest.(check string) "and taking statements" "1" (one t "select 1" []));
   Pg.Pool.close p
 
-(* A cancelled borrow never sends a statement it had not sent yet. *)
+(* A borrower cancelled while its work waits on something other than the
+   server returns at the cancellation, not when the work would have ended.
+   Its connection is closed and made again, so the next borrower finds
+   nothing of it. *)
+let a_cancelled_borrower_returns_at_the_cancellation () =
+  with_eio @@ fun env sw ->
+  let p = pool env sw in
+  let clock = Eio.Stdenv.mono_clock env in
+  let pid = ref "" and slept = ref false in
+  let waiting, wait = Eio.Promise.create () in
+  Eio.Fiber.first
+    (fun () ->
+      match
+        Pg.Pool.use p (fun t ->
+            pid := one t "select pg_backend_pid()::text" [];
+            script t "begin";
+            Eio.Promise.resolve wait ();
+            Eio.Time.Mono.sleep clock 5.;
+            slept := true)
+      with
+      | Ok () | Error `Busy -> ())
+    (fun () -> Eio.Promise.await waiting);
+  Alcotest.(check bool) "returned at the cancellation" false !slept;
+  borrow p (fun t ->
+      Alcotest.(check bool)
+        "lent idle" true
+        (match Pg.status t with P.Idle -> true | _ -> false);
+      Alcotest.(check bool)
+        "on a connection made again" false
+        (String.equal !pid (one t "select pg_backend_pid()::text" [])));
+  Pg.Pool.close p
+
+(* A cancelled borrow never sends a statement it had queued but not sent
+   yet. *)
 let a_statement_not_yet_sent_is_never_sent () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
@@ -4075,20 +4108,19 @@ let a_statement_not_yet_sent_is_never_sent () =
   borrow p (fun t ->
       script t
         "create table if not exists pgeio_unsent (n int); truncate pgeio_unsent");
-  let second = ref (Ok Pg.Tag.empty) in
-  (match
-     Eio.Time.with_timeout (Eio.Stdenv.clock env) 0.2 (fun () ->
-         Ok
-           (Pg.Pool.use p (fun t ->
-                Eio.Time.Mono.sleep clock 0.4;
-                second :=
-                  Pg.execute t "insert into pgeio_unsent values (1)" ~params:[])))
-   with
-  | Error `Timeout -> ()
-  | Ok _ -> Alcotest.fail "the borrow was not abandoned");
-  Alcotest.(check bool)
-    "refused before it was sent" true
-    (match !second with Error (Pg.Refused _) -> true | _ -> false);
+  let queued, queue = Eio.Promise.create () in
+  Eio.Fiber.first
+    (fun () ->
+      match
+        Pg.Pool.use p (fun t ->
+            ignore
+              (Pg.Pipeline.execute t "insert into pgeio_unsent values (1)"
+                 ~params:[]);
+            Eio.Promise.resolve queue ();
+            Eio.Time.Mono.sleep clock 5.)
+      with
+      | Ok () | Error `Busy -> ())
+    (fun () -> Eio.Promise.await queued);
   borrow p (fun t ->
       Alcotest.(check string)
         "and nothing reached the table" "0"
@@ -4656,6 +4688,8 @@ let pool_cases =
       a_held_pool_is_busy_then_serves;
     Alcotest.test_case "an abandoned statement is stopped at the server" `Quick
       an_abandoned_statement_is_stopped_at_the_server;
+    Alcotest.test_case "a cancelled borrower returns at the cancellation" `Quick
+      a_cancelled_borrower_returns_at_the_cancellation;
     Alcotest.test_case "a statement not yet sent is never sent" `Quick
       a_statement_not_yet_sent_is_never_sent;
     Alcotest.test_case "a transaction left open is rolled back" `Quick

@@ -130,12 +130,22 @@ let ready e =
         e
   | None -> ()
 
-(* Drained before [resume], while an abandoned borrower's statements are
+(* A cancelled borrower may leave a statement running: sent and unread, or
+   cut off midway with the socket closed under it, which Postgres would run
+   to its end. So it is cancelled at the server, and the connection closed
+   rather than read back into step, to be made again at the next lend; what
+   it had queued is never sent.
+
+   Drained before [resume], while an abandoned connection's statements are
    still refused, so one queued but unsent is dropped, never sent. A row
    function that raises while drained has closed the connection; it goes
    back all the same, to be made again at the next lend, and its exception
    is returned for the borrower to raise. *)
-let give_back t e =
+let give_back t e ~cancelled =
+  if cancelled then begin
+    ignore (C.cancel e.conn : (unit, C.error) result);
+    C.close e.conn
+  end;
   let raised =
     match C.Pipeline.drain e.conn with
     | (_ : (unit, C.error) result) -> None
@@ -303,27 +313,6 @@ let take (t : t) ~wait_s =
           Eio.Time.Mono.sleep t.clock wait_s;
           None))
 
-(* The work is shielded from Eio cancellation so it never stops mid-protocol.
-   Instead, cancelling cancels the running statement at the server and
-   refuses the next one, so the work fails fast and rolls back. *)
-let borrowed conn f =
-  let finished, finish = Eio.Promise.create () in
-  let answer, () =
-    Eio.Fiber.pair
-      (fun () ->
-        Fun.protect
-          ~finally:(fun () -> Eio.Promise.resolve finish ())
-          (fun () -> Eio.Cancel.protect (fun () -> f conn)))
-      (fun () ->
-        match Eio.Promise.await finished with
-        | () -> ()
-        | exception (Eio.Cancel.Cancelled _ as ex) ->
-            Eio.Cancel.protect (fun () ->
-                ignore (C.abandon conn : (unit, C.error) result));
-            raise ex)
-  in
-  answer
-
 let use ?wait_s t f =
   let wait_s = Option.value wait_s ~default:t.wait_s in
   let asked = now t in
@@ -334,18 +323,23 @@ let use ?wait_s t f =
   | Some e ->
       let given = now t in
       slow ~what:"a wait for a connection" ~over:wait_warn_ms asked given;
-      let answer =
-        match
-          ready e;
-          borrowed e.conn f
-        with
-        | v -> Ok v
-        | exception ex -> Error (ex, Printexc.get_raw_backtrace ())
+      (* [f] is not shielded: a cancellation stops it at whatever it is
+         waiting on. Only the give-back's own exchanges are. *)
+      let answer, cancelled =
+        match ready e with
+        | exception ex -> (Error (ex, Printexc.get_raw_backtrace ()), false)
+        | () -> (
+            match f e.conn with
+            | v -> (Ok v, false)
+            | exception (Eio.Cancel.Cancelled _ as ex) ->
+                (Error (ex, Printexc.get_raw_backtrace ()), true)
+            | exception ex -> (Error (ex, Printexc.get_raw_backtrace ()), false)
+            )
       in
       let raised =
         Eio.Cancel.protect (fun () ->
             slow ~what:"a borrowed connection" ~over:hold_warn_ms given (now t);
-            give_back t e)
+            give_back t e ~cancelled)
       in
       (* What the borrower raised, a cancellation included, came first and
          wins over what the drain raised. *)

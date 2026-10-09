@@ -9,6 +9,11 @@
   longer takes the connection out of the pool for good: the connection goes
   back, is made again at the next lend, and the exception reaches the
   caller as raised, not wrapped in `Fun.Finally_raised`.
+- Breaking: an Eio cancellation stops a `Pool.use` borrower at once,
+  wherever it waits. `f` was shielded until it returned, so a cancelled
+  borrower waited for work nobody wanted, or forever on something the
+  cancellation had stopped. Its statement is still cancelled at the
+  server; its connection is now closed and made again at the next lend.
 
 ## 0.1.0 (2026-10-06)
 
