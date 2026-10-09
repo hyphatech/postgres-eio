@@ -118,8 +118,8 @@ let count pool =
           match row with [| Some n |] -> Postgres_eio.Text.to_int n | _ -> None))
 ```
 
-`Pool.use` returns `` `Busy `` if no connection frees up within `wait_s`
-(5 s), and `` `Pool_closed `` at once after `Pool.close`;
+`Pool.use` returns `` `Pool `Busy `` if no connection frees up within
+`wait_s` (5 s), and `` `Pool `Closed `` at once after `Pool.close`;
 `Pool.error_to_string` prints either. Cancelling a borrower stops it at
 once, wherever it waits: its statement is cancelled at the server, so the
 transaction rolls back, and its connection is closed and made again at the

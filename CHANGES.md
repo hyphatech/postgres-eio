@@ -40,8 +40,8 @@
   retried with backoff, as a lost connection is, and no longer returned by
   `next`. It ended the loop with the error, though the server would take
   the sign-in a moment later. Any other server refusal is still returned.
-- `Pool.error_to_string` prints `Pool.use`'s `` `Busy ``, now named
-  `Pool.error`, as `error_to_string` prints a connection's error.
+- `Pool.error_to_string` prints a `Pool.error`, what `Pool.use` answers,
+  as `error_to_string` prints a connection's error.
 - Connecting keeps a random generator the application set as
   mirage-crypto's default, and sets one only where none is. Every
   connection replaced it with `Mirage_crypto_rng_unix.use_default ()`.
@@ -52,10 +52,13 @@
   longer quotes the part after the space in its error, which was part of
   the password. A word after `password=` is never quoted; the error says
   to quote the password, `password='a b'`.
-- Breaking: `Pool.use` on a closed pool returns `` `Pool_closed ``, a new
-  constructor of `Pool.error`, at once, and so does a borrow waiting when
-  the pool closes. It waited out `wait_s`, logged that no connection came
-  free, and returned `` `Busy ``, though none ever would.
+- Breaking: `Pool.error` is `` [ `Pool of [ `Busy | `Closed ] ] ``, the
+  pool's states under the pool, so an error merged with others says which
+  resource refused. `Pool.use` answers `` `Pool `Busy `` where it answered
+  `` `Busy ``, and `` `Pool `Closed `` on a closed pool, at once, as it does
+  to a borrow waiting when the pool closes. A closed pool waited out
+  `wait_s`, logged that no connection came free, and returned `` `Busy ``,
+  though none ever would.
 - `abandon`'s cancel request has 5 s, or the timeout if that is shorter,
   as a timeout's does. It had the connection's timeout alone, so with the
   timeout lifted, as a migration lifts it, a server that never closed the

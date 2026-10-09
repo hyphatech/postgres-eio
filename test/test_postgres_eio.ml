@@ -4395,7 +4395,7 @@ let borrow p f =
   | Ok v -> v
   | Error e -> Alcotest.fail (Pg.Pool.error_to_string e)
 
-(* An exhausted pool returns [`Busy] within its wait, then recovers. *)
+(* An exhausted pool returns [`Pool `Busy] within its wait, then recovers. *)
 let a_held_pool_is_busy_then_serves () =
   with_eio @@ fun env sw ->
   let p = pool ~wait_s:0.2 env sw in
@@ -4405,11 +4405,12 @@ let a_held_pool_is_busy_then_serves () =
     (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.5))
     (fun () -> answer := Pg.Pool.use p (fun _ -> ()));
   (match !answer with
-  | Error e ->
+  | Error (`Pool `Busy as e) ->
       Alcotest.(check string)
         "busy while held, and says so"
         "no connection came free within the pool's wait"
         (Pg.Pool.error_to_string e)
+  | Error (`Pool `Closed) -> Alcotest.fail "the open pool was closed"
   | Ok () -> Alcotest.fail "served while held");
   Alcotest.(check string)
     "served once free" "1"
@@ -4469,7 +4470,7 @@ let a_cancelled_borrower_is_not_held_by_its_cancel () =
             Pg.set_timeout t ~timeout_s:None;
             Eio.Time.Mono.sleep clock held)
       with
-      | Ok () | Error (`Busy | `Pool_closed) -> ())
+      | Ok () | Error (`Pool _) -> ())
     (fun () -> Eio.Time.Mono.sleep clock 0.2);
   Alcotest.(check bool) "returned before the server let go" false !let_go
 
@@ -4493,7 +4494,7 @@ let a_cancelled_borrower_returns_at_the_cancellation () =
             Eio.Time.Mono.sleep clock 5.;
             slept := true)
       with
-      | Ok () | Error (`Busy | `Pool_closed) -> ())
+      | Ok () | Error (`Pool _) -> ())
     (fun () -> Eio.Promise.await waiting);
   Alcotest.(check bool) "returned at the cancellation" false !slept;
   borrow p (fun t ->
@@ -4525,7 +4526,7 @@ let a_statement_not_yet_sent_is_never_sent () =
             Eio.Promise.resolve queue ();
             Eio.Time.Mono.sleep clock 5.)
       with
-      | Ok () | Error (`Busy | `Pool_closed) -> ())
+      | Ok () | Error (`Pool _) -> ())
     (fun () -> Eio.Promise.await queued);
   borrow p (fun t ->
       Alcotest.(check string)
@@ -4778,8 +4779,8 @@ let closing_a_pool_waits_for_its_borrows () =
   Alcotest.(check bool)
     "and none lent after" true
     (match Pg.Pool.use ~wait_s:0.1 p ignore with
-    | Error `Pool_closed -> true
-    | Ok () | Error `Busy -> false)
+    | Error (`Pool `Closed) -> true
+    | Ok () | Error (`Pool `Busy) -> false)
 
 (* A closed pool lends nothing, and says so at once: to a borrow already
    waiting when it closes, and to one asked for after. Their wait is an
@@ -4798,10 +4799,11 @@ let a_closed_pool_answers_at_once () =
         None)
   in
   let closed_answer what = function
-    | Some (Error e) ->
+    | Some (Error (`Pool `Closed as e)) ->
         Alcotest.(check string)
           what "the pool is closed"
           (Pg.Pool.error_to_string e)
+    | Some (Error (`Pool `Busy)) -> Alcotest.failf "%s: busy, not closed" what
     | Some (Ok ()) -> Alcotest.failf "%s: lent a connection" what
     | None -> Alcotest.failf "%s: no answer within %gs" what within
   in
@@ -4943,7 +4945,7 @@ let a_cancelled_reconnect_in_another_domain () =
       Eio.Fiber.first
         (fun () ->
           match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
-          | Ok () | Error (`Busy | `Pool_closed) -> ())
+          | Ok () | Error (`Pool _) -> ())
         (fun () -> Eio.Time.Mono.sleep clock 0.2));
   Atomic.set answering true;
   Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);
@@ -5065,7 +5067,7 @@ let a_cancelled_reset_gives_the_connection_back () =
   Eio.Fiber.first
     (fun () ->
       match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
-      | Ok () | Error (`Busy | `Pool_closed) -> ())
+      | Ok () | Error (`Pool _) -> ())
     (fun () -> Eio.Time.Mono.sleep clock 0.2);
   answering := true;
   Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);

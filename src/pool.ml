@@ -8,11 +8,11 @@ let src =
 
 module Log = (val Logs.src_log src : Logs.LOG)
 
-type error = [ `Busy | `Pool_closed ]
+type error = [ `Pool of [ `Busy | `Closed ] ]
 
 let error_to_string : error -> string = function
-  | `Busy -> "no connection came free within the pool's wait"
-  | `Pool_closed -> "the pool is closed"
+  | `Pool `Busy -> "no connection came free within the pool's wait"
+  | `Pool `Closed -> "the pool is closed"
 
 (* Only the holder of an entry (a borrower or the housekeeping) touches it,
    so no lock is needed. *)
@@ -325,7 +325,7 @@ let take (t : t) ~wait_s =
           (fun () -> Ok (Eio.Stream.take t.free));
           (fun () ->
             Eio.Promise.await t.closed;
-            Error `Pool_closed);
+            Error `Closed);
           (fun () ->
             Eio.Time.Mono.sleep t.clock wait_s;
             Error `Busy);
@@ -337,8 +337,8 @@ let use ?wait_s t f =
   match take t ~wait_s with
   | Error `Busy ->
       Log.warn (fun m -> m "no connection came free within %gs" wait_s);
-      Error `Busy
-  | Error `Pool_closed -> Error `Pool_closed
+      Error (`Pool `Busy)
+  | Error `Closed -> Error (`Pool `Closed)
   | Ok e ->
       let given = now t in
       slow ~what:"a wait for a connection" ~over_s:wait_warn_s asked given;
