@@ -61,9 +61,11 @@ val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy ]) result
     whatever it is waiting on, the server or anything else, and propagates from
     [use] at once. The connection then goes back closed, to be made again at the
     next lend: its running statement is first cancelled at the server
-    ({!Postgres_eio.cancel}, bounded by the connection's timeout), its
+    ({!Postgres_eio.cancel}), the request given the pool's timeout even if the
+    borrower lifted its own, and at most 5 s for a statement cut off midway; its
     transaction rolls back, and statements it queued but had not sent are never
-    sent. Only that give-back is shielded from the cancellation.
+    sent. Only that cancel request and the give-back are shielded from the
+    cancellation.
 
     Waits over 100 ms and borrows held over 250 ms log a [warn] on
     [postgres-eio.pool]. *)

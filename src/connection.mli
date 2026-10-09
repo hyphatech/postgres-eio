@@ -7,7 +7,12 @@
     Every failure is a value. Driver errors and logs never contain parameters,
     passwords, sign-in exchanges or message bytes. The [postgres-eio] log source
     has a [debug] line per connection and logs notices at their own level.
-    Server errors are the server's words; see {!Server_error.to_string}. *)
+    Server errors are the server's words; see {!Server_error.to_string}.
+
+    An Eio cancellation of a statement under way closes the connection and
+    propagates, after the statement is cancelled at the server, as {!cancel}
+    does; that request is shielded from the cancellation and given 5 s, or the
+    connection's timeout if that is shorter, even when the timeout is lifted. *)
 
 type t
 
@@ -16,7 +21,10 @@ type error =
   | Refused of string
       (** refused by the driver: an unsafe sign-in, an untrusted certificate, a
           value it cannot send *)
-  | Timeout  (** the connection's timeout passed; the connection is closed *)
+  | Timeout
+      (** the connection's timeout passed; the connection is closed, and its
+          running statement cancelled at the server, as {!cancel} does, the
+          request given 5 s or the timeout, whichever is shorter *)
   | Closed  (** the connection is closed, or the server closed it *)
   | Io of string  (** the socket or TLS failed; the connection is closed *)
   | Protocol of string

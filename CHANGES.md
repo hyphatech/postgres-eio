@@ -14,6 +14,13 @@
   borrower waited for work nobody wanted, or forever on something the
   cancellation had stopped. Its statement is still cancelled at the
   server; its connection is now closed and made again at the next lend.
+- A `Timeout`, or an Eio cancellation of a statement under way, cancels
+  the statement at the server as it closes the connection. Before, only a
+  pool's cancelled borrower did; elsewhere the server ran the statement to
+  its end with nobody to read it. The request has 5 s, or the timeout if
+  that is shorter, and a pool's cancelled borrower's has the pool's
+  timeout: with the timeout lifted, a server that never closed the
+  request's connection held the caller forever.
 
 ## 0.1.0 (2026-10-06)
 

@@ -948,6 +948,52 @@ let connect ~sw ~net ~clock ?(parameters = []) ?(timeout_s = 30.)
   open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
     ~heard:None conninfo
 
+(* Cancelling *)
+
+(* 54.2.8: a separate connection to the same server. Waits for the server
+   to close it, so the request was read when this returns, or until
+   [within] passes. Safe to call from another fiber. *)
+let send_cancel t ~within =
+  match t.reached with
+  | None -> Ok ()
+  | Some { endpoint; address; secure } -> (
+      match
+        Eio.Switch.run (fun sw ->
+            bounded ~clock:t.clock within (fun () ->
+                let socket =
+                  (guard (fun () -> Eio.Net.connect ~sw t.net address)
+                    :> socket)
+                in
+                let flow =
+                  match (secure, t.tls) with
+                  | false, _ | true, None -> socket
+                  | true, Some config -> (
+                      match t.conninfo.ssl_negotiation with
+                      | C.Direct ->
+                          fst (handshake t config endpoint socket ~direct:true)
+                      | C.Postgres -> (
+                          match negotiate t config endpoint socket with
+                          | Encrypted (flow, _) -> flow
+                          | Declined | Errored ->
+                              fail (Refused "the server no longer offers TLS")))
+                in
+                guard (fun () ->
+                    Eio.Flow.copy_string
+                      (encode (P.Cancel_request { pid = t.pid; key = t.key }))
+                      flow);
+                let buf = Cstruct.create 64 in
+                let rec until_closed () =
+                  match Eio.Flow.single_read flow buf with
+                  | _ -> until_closed ()
+                  | exception End_of_file -> ()
+                in
+                guard until_closed))
+      with
+      | () -> Ok ()
+      | exception Fail e -> Error e)
+
+let cancel t = send_cancel t ~within:t.timeout_s
+
 (* The answer queue *)
 
 let break t e =
@@ -969,6 +1015,28 @@ let abandoned =
     "the work this connection was lent for was cancelled, and its statements \
      are not sent"
 
+(* A cancel request is a connect, perhaps a TLS handshake, and one small
+   message on a server that answers within milliseconds; 5 s is far past
+   that, and short enough that a caller already given up on waits little
+   more. *)
+let cancel_request_s = 5.
+
+(* 54.2.8: a timeout or a cancellation leaves the statement running at the
+   server, which would run it to its end for nobody, so it is cancelled
+   there as the connection closes. The request is shielded, since a
+   cancelled caller is one it is sent for, so it has a bound of its own:
+   the connection's timeout may be lifted, and a caller whose wait was
+   given up is not made to wait as long again. *)
+let stop t e =
+  break t e;
+  let within =
+    match t.timeout_s with
+    | Some s -> Float.min s cancel_request_s
+    | None -> cancel_request_s
+  in
+  Eio.Cancel.protect (fun () ->
+      ignore (send_cancel t ~within:(Some within) : (unit, error) result))
+
 (* [sending] false: only reads, allowed even while refusing statements. *)
 let run ?(sending = true) t f =
   match t.link with
@@ -978,9 +1046,15 @@ let run ?(sending = true) t f =
       match exchange t link (fun () -> f link) with
       | answer -> answer
       | exception Fail (Refused _ as e) -> Error e
+      | exception Fail Timeout ->
+          stop t Timeout;
+          Error Timeout
       | exception Fail e ->
           break t e;
           Error e
+      | exception (Eio.Cancel.Cancelled _ as ex) ->
+          stop t Closed;
+          raise ex
       | exception ex ->
           break t Closed;
           raise ex)
@@ -1922,48 +1996,6 @@ let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache
 let timeout_s t = t.timeout_s
 let set_timeout t ~timeout_s = t.timeout_s <- timeout_s
-
-(* 54.2.8: a separate connection to the same server. Waits for the server
-   to close it, so the request was read when this returns. Safe to call
-   from another fiber. *)
-let cancel t =
-  match t.reached with
-  | None -> Ok ()
-  | Some { endpoint; address; secure } -> (
-      match
-        Eio.Switch.run (fun sw ->
-            bounded ~clock:t.clock t.timeout_s (fun () ->
-                let socket =
-                  (guard (fun () -> Eio.Net.connect ~sw t.net address)
-                    :> socket)
-                in
-                let flow =
-                  match (secure, t.tls) with
-                  | false, _ | true, None -> socket
-                  | true, Some config -> (
-                      match t.conninfo.ssl_negotiation with
-                      | C.Direct ->
-                          fst (handshake t config endpoint socket ~direct:true)
-                      | C.Postgres -> (
-                          match negotiate t config endpoint socket with
-                          | Encrypted (flow, _) -> flow
-                          | Declined | Errored ->
-                              fail (Refused "the server no longer offers TLS")))
-                in
-                guard (fun () ->
-                    Eio.Flow.copy_string
-                      (encode (P.Cancel_request { pid = t.pid; key = t.key }))
-                      flow);
-                let buf = Cstruct.create 64 in
-                let rec until_closed () =
-                  match Eio.Flow.single_read flow buf with
-                  | _ -> until_closed ()
-                  | exception End_of_file -> ()
-                in
-                guard until_closed))
-      with
-      | () -> Ok ()
-      | exception Fail e -> Error e)
 
 let abandon t =
   t.refusing <- true;

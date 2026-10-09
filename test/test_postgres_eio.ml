@@ -1720,6 +1720,63 @@ let a_cancellation_from_outside_is_not_a_timeout () =
   Alcotest.(check bool) "the cancellation raised" true !raised;
   Alcotest.(check bool) "and the connection closed" true (Pg.closed t)
 
+(* Whether backend [pid] still runs a statement, asked from another
+   connection until it stops or [within] seconds pass. [within] is far
+   below the statement's own length, so the answer turns on whether it was
+   cancelled, not on how fast the machine is. The backend is then
+   terminated, so a statement left running does not outlive the case. *)
+let still_running env sw pid ~within =
+  let admin = connect env sw (plain ()) in
+  let clock = Eio.Stdenv.mono_clock env in
+  let started = Eio.Time.Mono.now clock in
+  let running () =
+    String.equal "1"
+      (one admin
+         "select count(*)::text from pg_stat_activity where pid = $1::int and \
+          state = 'active'"
+         [ Some pid ])
+  in
+  let rec wait () =
+    if not (running ()) then false
+    else if seconds_since clock started > within then true
+    else begin
+      Eio.Time.Mono.sleep clock 0.05;
+      wait ()
+    end
+  in
+  let answer = wait () in
+  ignore (rows admin "select pg_terminate_backend($1::int, 5000)" [ Some pid ]);
+  Pg.close admin;
+  answer
+
+(* A timeout closes the connection and cancels its statement at the
+   server, which would otherwise run it to its end for nobody. *)
+let a_timed_out_statement_is_cancelled_at_the_server () =
+  with_eio @@ fun env sw ->
+  let t = connect ~timeout_s:0.5 env sw (plain ()) in
+  let pid = one t "select pg_backend_pid()::text" [] in
+  (match Pg.execute t "select pg_sleep(60)" ~params:[] with
+  | Error Pg.Timeout -> ()
+  | Ok _ -> Alcotest.fail "no timeout"
+  | Error e -> Alcotest.fail (Pg.error_to_string e));
+  Alcotest.(check bool) "closed" true (Pg.closed t);
+  Alcotest.(check bool)
+    "and stopped at the server" false
+    (still_running env sw pid ~within:10.)
+
+(* So does an Eio cancellation of an exchange under way. *)
+let a_cancelled_exchange_is_cancelled_at_the_server () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  let pid = one t "select pg_backend_pid()::text" [] in
+  Eio.Fiber.first
+    (fun () -> ignore (Pg.execute t "select pg_sleep(60)" ~params:[]))
+    (fun () -> Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.2);
+  Alcotest.(check bool) "closed" true (Pg.closed t);
+  Alcotest.(check bool)
+    "and stopped at the server" false
+    (still_running env sw pid ~within:10.)
+
 let a_server_error_keeps_the_connection () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
@@ -2132,8 +2189,10 @@ let cancelled env t =
 (* A fake server that trusts everyone. It answers SSLRequest with [ssl]
    ("N"; "E" then nothing; or "S" then non-TLS bytes), and StartupMessage
    with [before], AuthenticationOk, [reported] as ParameterStatus, and
-   ReadyForQuery. It counts connections. *)
-let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = []) () =
+   ReadyForQuery. It counts connections. A CancelRequest is given to
+   [on_cancel], and its connection closed when that returns. *)
+let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
+    ?(on_cancel = ignore) () =
   let listener =
     Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env)
       (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
@@ -2159,6 +2218,10 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = []) () =
               write ssl;
               if String.equal ssl "N" then startup ()
             end
+            else if
+              String.length body >= 4
+              && Int32.equal (String.get_int32_be body 0) 80877102l
+            then on_cancel ()
             else begin
               write
                 (before
@@ -2369,6 +2432,29 @@ let a_refused_address_leaves_no_socket () =
     Pg.close (connect env sw c)
   done;
   Alcotest.(check int) "no descriptor left behind" before (open_descriptors ())
+
+(* A server that takes a cancel request and never closes its connection
+   does not hold a cancelled caller, even with the timeout lifted: the
+   request has a bound of its own. The fake lets go after [held] seconds,
+   far past that bound, so a caller still waiting then was unbounded. *)
+let a_cancel_request_left_unanswered_is_given_up () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let held = 30. and let_go = ref false in
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_cancel:(fun () ->
+        Eio.Time.Mono.sleep clock held;
+        let_go := true)
+      ()
+  in
+  let t = connect env sw (fake port) in
+  Pg.set_timeout t ~timeout_s:None;
+  Eio.Fiber.first
+    (fun () -> ignore (Pg.execute t "select pg_sleep(60)" ~params:[]))
+    (fun () -> Eio.Time.Mono.sleep clock 0.2);
+  Alcotest.(check bool) "closed" true (Pg.closed t);
+  Alcotest.(check bool) "and returned before the server let go" false !let_go
 
 (* target_session_attrs: read-write skips a standby; standby finds one. *)
 let the_kind_of_host_asked_for () =
@@ -3883,6 +3969,12 @@ let connection_cases =
     Alcotest.test_case "54.2.8 a running statement is cancelled" `Quick
       a_running_statement_is_cancelled;
     Alcotest.test_case "54.2.8 a cancel over TLS" `Quick a_cancel_over_tls;
+    Alcotest.test_case "54.2.8 a timed-out statement is cancelled at the server"
+      `Quick a_timed_out_statement_is_cancelled_at_the_server;
+    Alcotest.test_case "54.2.8 a cancelled exchange is cancelled at the server"
+      `Quick a_cancelled_exchange_is_cancelled_at_the_server;
+    Alcotest.test_case "54.2.8 a cancel request left unanswered is given up"
+      `Quick a_cancel_request_left_unanswered_is_given_up;
     Alcotest.test_case "a reset keeps its parameters" `Quick
       a_reset_keeps_its_parameters;
     Alcotest.test_case "a silent server times out" `Quick
@@ -4071,6 +4163,37 @@ let an_abandoned_statement_is_stopped_at_the_server () =
    server returns at the cancellation, not when the work would have ended.
    Its connection is closed and made again, so the next borrower finds
    nothing of it. *)
+(* A borrower that lifted its connection's timeout and is cancelled
+   between exchanges is not held by a cancel request the server never
+   closes: the request has the pool's timeout. The fake lets go after
+   [held] seconds, far past it. *)
+let a_cancelled_borrower_is_not_held_by_its_cancel () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let held = 30. and let_go = ref false in
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_cancel:(fun () ->
+        Eio.Time.Mono.sleep clock held;
+        let_go := true)
+      ()
+  in
+  let p =
+    ok_pg
+      (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env) ~clock ~timeout_s:0.5
+         ~size:1 (fake port))
+  in
+  Eio.Fiber.first
+    (fun () ->
+      match
+        Pg.Pool.use p (fun t ->
+            Pg.set_timeout t ~timeout_s:None;
+            Eio.Time.Mono.sleep clock held)
+      with
+      | Ok () | Error `Busy -> ())
+    (fun () -> Eio.Time.Mono.sleep clock 0.2);
+  Alcotest.(check bool) "returned before the server let go" false !let_go
+
 let a_cancelled_borrower_returns_at_the_cancellation () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
@@ -4690,6 +4813,8 @@ let pool_cases =
       an_abandoned_statement_is_stopped_at_the_server;
     Alcotest.test_case "a cancelled borrower returns at the cancellation" `Quick
       a_cancelled_borrower_returns_at_the_cancellation;
+    Alcotest.test_case "a cancelled borrower is not held by its cancel" `Quick
+      a_cancelled_borrower_is_not_held_by_its_cancel;
     Alcotest.test_case "a statement not yet sent is never sent" `Quick
       a_statement_not_yet_sent_is_never_sent;
     Alcotest.test_case "a transaction left open is rolled back" `Quick

@@ -130,11 +130,12 @@ let ready e =
         e
   | None -> ()
 
-(* A cancelled borrower may leave a statement running: sent and unread, or
-   cut off midway with the socket closed under it, which Postgres would run
-   to its end. So it is cancelled at the server, and the connection closed
-   rather than read back into step, to be made again at the next lend; what
-   it had queued is never sent.
+(* A borrower cancelled between exchanges may leave a statement sent and
+   unread, which Postgres would run to its end, so it is cancelled at the
+   server, within the pool's timeout, since the borrower may have lifted
+   its own; one cancelled midway has closed the connection and cancelled
+   its own. The connection is closed rather than read back into step, to
+   be made again at the next lend, and what it had queued is never sent.
 
    Drained before [resume], while an abandoned connection's statements are
    still refused, so one queued but unsent is dropped, never sent. A row
@@ -142,7 +143,8 @@ let ready e =
    back all the same, to be made again at the next lend, and its exception
    is returned for the borrower to raise. *)
 let give_back t e ~cancelled =
-  if cancelled then begin
+  if cancelled && not (C.closed e.conn) then begin
+    C.set_timeout e.conn ~timeout_s:t.timeout_s;
     ignore (C.cancel e.conn : (unit, C.error) result);
     C.close e.conn
   end;
