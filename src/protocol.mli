@@ -118,8 +118,8 @@ type reader
 
 val reader : ?limit:int -> unit -> reader
 (** An empty reader. Messages over [limit] bytes (1 GiB) are refused. Its buffer
-    grows to hold a whole message, and once a message over 128 KiB has made it
-    larger than that, it goes back to 4 KiB the next time it is empty. *)
+    grows to hold a whole message, and once it has grown past 128 KiB it goes
+    back to 4 KiB the next time it is empty. *)
 
 val feed : reader -> Cstruct.t -> unit
 (** Copies the bytes in, so the caller may reuse the buffer at once. *)
