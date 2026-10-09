@@ -40,6 +40,8 @@
   retried with backoff, as a lost connection is, and no longer returned by
   `next`. It ended the loop with the error, though the server would take
   the sign-in a moment later. Any other server refusal is still returned.
+- `Pool.error_to_string` prints `Pool.use`'s `` `Busy ``, now named
+  `Pool.error`, as `error_to_string` prints a connection's error.
 - A keyword connection string whose password holds an unquoted space no
   longer quotes the part after the space in its error, which was part of
   the password. A word after `password=` is never quoted; the error says

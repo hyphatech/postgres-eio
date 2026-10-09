@@ -10,6 +10,10 @@
     for notifications. *)
 
 type t
+type error = [ `Busy  (** no connection came free within the wait *) ]
+
+val error_to_string : error -> string
+(** A sentence safe to log. *)
 
 val create :
   sw:Eio.Switch.t ->
@@ -46,7 +50,7 @@ val create :
     while another is idle, and replaced if it fails. Borrowed connections are
     never touched. *)
 
-val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> `Busy ]) result
+val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> error ]) result
 (** Borrows a connection, runs [f] on the calling fiber, and returns it, even if
     [f] raises. [`Busy] if none came free within the wait.
 

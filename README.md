@@ -119,7 +119,7 @@ let count pool =
 ```
 
 `Pool.use` returns `` `Busy `` if no connection frees up within `wait_s`
-(5 s). Cancelling a borrower stops it at once, wherever it waits: its
+(5 s); `Pool.error_to_string` prints it. Cancelling a borrower stops it at once, wherever it waits: its
 statement is cancelled at the server, so the transaction rolls back, and
 its connection is closed and made again at the next lend.
 

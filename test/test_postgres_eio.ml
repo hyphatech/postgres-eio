@@ -4305,9 +4305,13 @@ let a_held_pool_is_busy_then_serves () =
   Eio.Fiber.both
     (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.5))
     (fun () -> answer := Pg.Pool.use p (fun _ -> ()));
-  Alcotest.(check bool)
-    "busy while held" true
-    (match !answer with Error `Busy -> true | Ok () -> false);
+  (match !answer with
+  | Error e ->
+      Alcotest.(check string)
+        "busy while held, and says so"
+        "no connection came free within the pool's wait"
+        (Pg.Pool.error_to_string e)
+  | Ok () -> Alcotest.fail "served while held");
   Alcotest.(check string)
     "served once free" "1"
     (borrow p (fun t -> one t "select 1" []));

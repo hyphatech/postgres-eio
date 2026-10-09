@@ -8,6 +8,11 @@ let src =
 
 module Log = (val Logs.src_log src : Logs.LOG)
 
+type error = [ `Busy ]
+
+let error_to_string (`Busy : error) =
+  "no connection came free within the pool's wait"
+
 (* Only the holder of an entry (a borrower or the housekeeping) touches it,
    so no lock is needed. *)
 type entry = {
