@@ -42,6 +42,9 @@
   the sign-in a moment later. Any other server refusal is still returned.
 - `Pool.error_to_string` prints `Pool.use`'s `` `Busy ``, now named
   `Pool.error`, as `error_to_string` prints a connection's error.
+- Connecting keeps a random generator the application set as
+  mirage-crypto's default, and sets one only where none is. Every
+  connection replaced it with `Mirage_crypto_rng_unix.use_default ()`.
 - A keyword connection string whose password holds an unquoted space no
   longer quotes the part after the space in its error, which was part of
   the password. A word after `password=` is never quoted; the error says

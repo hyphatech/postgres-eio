@@ -9,6 +9,8 @@
   eio
   eio_main
   mtime
+  mirage-crypto-rng
+  mirage-crypto-rng.unix
   logs
   unix
   alcotest

@@ -906,8 +906,12 @@ let establish t =
 
 let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
     ~heard conninfo =
-  (* TLS and the SCRAM nonce fail at runtime without a seeded RNG. *)
-  Mirage_crypto_rng_unix.use_default ();
+  (* TLS and the SCRAM nonce fail at runtime without a seeded RNG. One the
+     application set is its choice, and stays. *)
+  (match Mirage_crypto_rng.default_generator () with
+  | _ -> ()
+  | exception Mirage_crypto_rng.No_default_generator ->
+      Mirage_crypto_rng_unix.use_default ());
   match
     match (conninfo : C.t).ssl_mode with
     | C.Disable -> None

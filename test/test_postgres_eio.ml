@@ -2285,6 +2285,20 @@ let a_sign_in_bound_to_tls () =
       Pg.close t)
     [ Postgres; Direct ]
 
+(* A random generator the application set is the one every exchange draws
+   from: connecting replaces nothing the application chose. *)
+let the_applications_random_generator_is_kept () =
+  with_eio @@ fun env sw ->
+  let port, _ = a_fake_postgres env sw () in
+  let chosen =
+    Mirage_crypto_rng.create (module Mirage_crypto_rng_unix.Getentropy)
+  in
+  Mirage_crypto_rng.set_default_generator chosen;
+  Pg.close (connect env sw (fake port));
+  Alcotest.(check bool)
+    "the application's generator, after a connection" true
+    (Mirage_crypto_rng.default_generator () == chosen)
+
 (* channel_binding=require refuses a server not offering it, before SASL. *)
 let a_required_binding_refuses_a_server_without_one () =
   with_eio @@ fun env sw ->
@@ -4259,6 +4273,8 @@ let connection_cases =
       a_name_tls_cannot_carry;
     Alcotest.test_case "54.3.1 a sign-in bound to TLS" `Quick
       a_sign_in_bound_to_tls;
+    Alcotest.test_case "the application's random generator is kept" `Quick
+      the_applications_random_generator_is_kept;
     Alcotest.test_case "54.3.1 a required binding refuses a server without one"
       `Quick a_required_binding_refuses_a_server_without_one;
     Alcotest.test_case "require_auth refuses what it does not allow" `Quick

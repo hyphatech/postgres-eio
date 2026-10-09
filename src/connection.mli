@@ -57,7 +57,11 @@ val connect :
 
     [statement_cache] (256) is how many statements stay parsed, LRU by SQL text,
     emptied by {!reset}. [0] disables it, for poolers without named statements
-    (pgbouncer before 1.21 in transaction mode). *)
+    (pgbouncer before 1.21 in transaction mode).
+
+    TLS and SCRAM draw from mirage-crypto's default random generator: one the
+    application set is kept, and where it set none the first connection sets
+    [Mirage_crypto_rng_unix.use_default]'s. *)
 
 (** {1 Statements}
 
