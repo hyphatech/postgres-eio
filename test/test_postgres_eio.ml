@@ -1818,6 +1818,29 @@ let a_cancelled_exchange_is_cancelled_at_the_server () =
     "and stopped at the server" false
     (still_running env sw pid ~within:10.)
 
+(* So does a row function that raises: the rows after it are never read,
+   and the statement would run on for nobody. The first row is long
+   enough to leave the server's buffer before the second sleeps. *)
+let a_raising_row_function_is_cancelled_at_the_server () =
+  with_eio @@ fun env sw ->
+  let t = connect env sw (plain ()) in
+  let pid = one t "select pg_backend_pid()::text" [] in
+  let exception Enough in
+  (match
+     Pg.query t
+       "select case when n = 1 then repeat('x', 100000) else \
+        pg_sleep(60)::text end from generate_series(1, 2) n"
+       ~params:[] ~init:() ~row:(fun () _ -> raise Enough)
+   with
+  | exception Enough -> ()
+  | exception ex -> Alcotest.failf "raised %s" (Printexc.to_string ex)
+  | Ok _ -> Alcotest.fail "the row function's exception was lost"
+  | Error e -> Alcotest.fail (Pg.error_to_string e));
+  Alcotest.(check bool) "closed" true (Pg.closed t);
+  Alcotest.(check bool)
+    "and stopped at the server" false
+    (still_running env sw pid ~within:10.)
+
 let a_server_error_keeps_the_connection () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
@@ -4212,6 +4235,9 @@ let connection_cases =
       `Quick a_timed_out_statement_is_cancelled_at_the_server;
     Alcotest.test_case "54.2.8 a cancelled exchange is cancelled at the server"
       `Quick a_cancelled_exchange_is_cancelled_at_the_server;
+    Alcotest.test_case
+      "54.2.8 a row function that raises is cancelled at the server" `Quick
+      a_raising_row_function_is_cancelled_at_the_server;
     Alcotest.test_case "54.2.8 a cancel request left unanswered is given up"
       `Quick a_cancel_request_left_unanswered_is_given_up;
     Alcotest.test_case "54.2.8 an abandon left unanswered is given up" `Quick

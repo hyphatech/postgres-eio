@@ -1036,10 +1036,10 @@ let cancel_given_up t =
   in
   send_cancel t ~within:(Some within)
 
-(* 54.2.8: a timeout or a cancellation leaves the statement running at the
-   server, which would run it to its end for nobody, so it is cancelled
-   there as the connection closes, shielded, since a cancelled caller is
-   one it is sent for. *)
+(* 54.2.8: a timeout, a cancellation or a raise from the caller's callback
+   leaves the statement running at the server, which would run it to its
+   end for nobody, so it is cancelled there as the connection closes,
+   shielded, since a cancelled caller is one it is sent for. *)
 let stop t e =
   break t e;
   Eio.Cancel.protect (fun () ->
@@ -1060,12 +1060,10 @@ let run ?(sending = true) t f =
       | exception Fail e ->
           break t e;
           Error e
-      | exception (Eio.Cancel.Cancelled _ as ex) ->
-          stop t Closed;
-          raise ex
       | exception ex ->
-          break t Closed;
-          raise ex)
+          let bt = Printexc.get_raw_backtrace () in
+          stop t Closed;
+          Printexc.raise_with_backtrace ex bt)
 
 let enqueue link bytes reply =
   Buffer.add_string link.out bytes;

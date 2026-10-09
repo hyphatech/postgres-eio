@@ -60,6 +60,10 @@
   as a timeout's does. It had the connection's timeout alone, so with the
   timeout lifted, as a migration lifts it, a server that never closed the
   request's connection held the lender forever.
+- A row or chunk function that raises cancels its statement at the server
+  as the connection closes, as a timeout does, and its exception still
+  propagates as raised. The connection closed alone, and the server ran
+  the statement to its end with nobody to read it.
 
 ## 0.1.0 (2026-10-06)
 

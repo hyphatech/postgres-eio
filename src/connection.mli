@@ -9,10 +9,12 @@
     has a [debug] line per connection and logs notices at their own level.
     Server errors are the server's words; see {!Server_error.to_string}.
 
-    An Eio cancellation of a statement under way closes the connection and
-    propagates, after the statement is cancelled at the server, as {!cancel}
-    does; that request is shielded from the cancellation and given 5 s, or the
-    connection's timeout if that is shorter, even when the timeout is lifted. *)
+    An Eio cancellation of a statement under way, or an exception raised by a
+    callback while it is read (a [row] or [chunk] function), closes the
+    connection and propagates as it came, after the statement is cancelled at
+    the server, as {!cancel} does; that request is shielded from the
+    cancellation and given 5 s, or the connection's timeout if that is shorter,
+    even when the timeout is lifted. *)
 
 type t
 
@@ -86,8 +88,8 @@ val query :
 (** Runs one statement by the extended protocol. [params] bind [$1], [$2], ...
     as text, [None] for NULL. [columns] is called once before any row, even with
     no rows. [row] folds each row as it arrives ([None] is NULL); rows are not
-    buffered. If [row] raises, the connection is closed and the exception
-    propagates.
+    buffered. If [row] raises, the connection is closed, the statement cancelled
+    at the server, and the exception propagates.
 
     [binary] (false) requests binary for the types in {!Value.binary}, text for
     the rest; {!Value} decodes either. This needs column types before Bind,
@@ -199,8 +201,8 @@ val copy_out :
   ('a * Tag.t, error) result
 (** Runs a [COPY ... TO STDOUT], folding each CopyData into [chunk] as it
     arrives, in the statement's format. Any other statement is refused, after it
-    has run. If [chunk] raises, the connection is closed and the exception
-    propagates. *)
+    has run. If [chunk] raises, the connection is closed, the statement
+    cancelled at the server, and the exception propagates. *)
 
 val copy_out_rows :
   t ->
