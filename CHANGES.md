@@ -52,6 +52,10 @@
   longer quotes the part after the space in its error, which was part of
   the password. A word after `password=` is never quoted; the error says
   to quote the password, `password='a b'`.
+- Breaking: `Pool.use` on a closed pool returns `` `Closed ``, a new
+  constructor of `Pool.error`, at once, and so does a borrow waiting when
+  the pool closes. It waited out `wait_s`, logged that no connection came
+  free, and returned `` `Busy ``, though none ever would.
 
 ## 0.1.0 (2026-10-06)
 

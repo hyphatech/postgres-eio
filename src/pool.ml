@@ -8,10 +8,11 @@ let src =
 
 module Log = (val Logs.src_log src : Logs.LOG)
 
-type error = [ `Busy ]
+type error = [ `Busy | `Closed ]
 
-let error_to_string (`Busy : error) =
-  "no connection came free within the pool's wait"
+let error_to_string : error -> string = function
+  | `Busy -> "no connection came free within the pool's wait"
+  | `Closed -> "the pool is closed"
 
 (* Only the holder of an entry (a borrower or the housekeeping) touches it,
    so no lock is needed. *)
@@ -27,7 +28,9 @@ type entry = {
    bound and cannot cancel a borrower's work. *)
 type t = {
   free : entry Eio.Stream.t;
-  mutable closed : bool; [@atomic]
+  (* Resolved by [close]; a borrow waiting races it. *)
+  closed : unit Eio.Promise.t;
+  close_now : unit Eio.Promise.u;
   size : int;
   wait_s : float;
   clock : Eio.Time.Mono.ty Eio.Resource.t;
@@ -103,7 +106,8 @@ let queue_reset t e =
 
 let back t e =
   e.idle_since <- now t;
-  if t.closed then C.close e.conn else Eio.Stream.add t.free e
+  if Eio.Promise.is_resolved t.closed then C.close e.conn
+  else Eio.Stream.add t.free e
 
 let made_again what e =
   Log.info (fun m -> m "%s, and is made again" what);
@@ -239,7 +243,7 @@ let passes_per_period = 4.
 let housekeeping t ~every =
   let rec loop () =
     Eio.Time.Mono.sleep t.clock every;
-    if not t.closed then begin
+    if not (Eio.Promise.is_resolved t.closed) then begin
       tidy t;
       loop ()
     end
@@ -264,10 +268,12 @@ let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
   Result.map
     (fun all ->
       let size = List.length all in
+      let closed, close_now = Eio.Promise.create () in
       let t =
         {
           free = Eio.Stream.create size;
-          closed = false;
+          closed;
+          close_now;
           size;
           wait_s;
           clock :> Eio.Time.Mono.ty Eio.Resource.t;
@@ -305,29 +311,35 @@ let slow ~what ~over_s since until =
   let s = Mtime.Span.to_float_ns (Mtime.span since until) /. 1e9 in
   if s > over_s then Log.warn (fun m -> m "%s took %.0f ms" what (s *. 1000.))
 
-(* Both [Fiber.first] branches can succeed at once, and the loser's result
-   is dropped; if that were a connection it would leak from the pool. So
-   the connection always wins. *)
+(* Several branches can succeed at once, and the losers' results are
+   dropped; if one were a connection it would leak from the pool. So the
+   connection always wins. *)
 let take (t : t) ~wait_s =
   Atomic.incr t.waiting;
   Fun.protect
     ~finally:(fun () -> Atomic.decr t.waiting)
     (fun () ->
-      Eio.Fiber.first
-        ~combine:(fun a b -> match a with Some _ -> a | None -> b)
-        (fun () -> Some (Eio.Stream.take t.free))
-        (fun () ->
-          Eio.Time.Mono.sleep t.clock wait_s;
-          None))
+      Eio.Fiber.any
+        ~combine:(fun a b -> match a with Ok _ -> a | Error _ -> b)
+        [
+          (fun () -> Ok (Eio.Stream.take t.free));
+          (fun () ->
+            Eio.Promise.await t.closed;
+            Error `Closed);
+          (fun () ->
+            Eio.Time.Mono.sleep t.clock wait_s;
+            Error `Busy);
+        ])
 
 let use ?wait_s t f =
   let wait_s = Option.value wait_s ~default:t.wait_s in
   let asked = now t in
   match take t ~wait_s with
-  | None ->
+  | Error `Busy ->
       Log.warn (fun m -> m "no connection came free within %gs" wait_s);
       Error `Busy
-  | Some e ->
+  | Error `Closed -> Error `Closed
+  | Ok e ->
       let given = now t in
       slow ~what:"a wait for a connection" ~over_s:wait_warn_s asked given;
       (* [f] is not shielded: a cancellation stops it at whatever it is
@@ -359,7 +371,7 @@ let use ?wait_s t f =
 (* Borrowed connections close when returned, not under a running
    transaction. *)
 let close t =
-  t.closed <- true;
+  ignore (Eio.Promise.try_resolve t.close_now () : bool);
   let rec idle () =
     match Eio.Stream.take_nonblocking t.free with
     | Some e ->

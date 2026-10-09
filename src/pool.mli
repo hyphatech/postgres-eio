@@ -10,7 +10,10 @@
     for notifications. *)
 
 type t
-type error = [ `Busy  (** no connection came free within the wait *) ]
+
+type error =
+  [ `Busy  (** no connection came free within the wait *)
+  | `Closed  (** the pool is closed *) ]
 
 val error_to_string : error -> string
 (** A sentence safe to log. *)
@@ -52,7 +55,8 @@ val create :
 
 val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> error ]) result
 (** Borrows a connection, runs [f] on the calling fiber, and returns it, even if
-    [f] raises. [`Busy] if none came free within the wait.
+    [f] raises. [`Busy] if none came free within the wait, and [`Closed] at once
+    if the pool is closed, or closes while the borrow waits.
 
     A connection whose reset failed or that was closed is reconnected on lend.
     If that fails, a [warn] is logged and its first statement returns [Closed].
@@ -86,4 +90,5 @@ val stats : t -> stats
 
 val close : t -> unit
 (** Closes idle connections now and borrowed ones when returned, never under a
-    running transaction. Housekeeping stops at its next pass. *)
+    running transaction. A borrow waiting, and every one after, returns
+    [`Closed]. Housekeeping stops at its next pass. *)
