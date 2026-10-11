@@ -28,6 +28,8 @@
  (modules test_style)
  (libraries alcotest)
  (deps
+  ; The shared refusals, read from the blocks OCAML.md fences, and every
+  ; directory the build reads, each held to them by what its dune builds.
   ../OCAML.md
-  (glob_files ../src/*.ml)
-  (glob_files ../src/*.mli)))
+  (glob_files_rec ../dune)
+  (glob_files_rec ../*.{ml,mli})))
