@@ -146,11 +146,9 @@ let ready e =
    its own. The connection is closed rather than read back into step, to
    be made again at the next lend, and what it had queued is never sent.
 
-   Drained before [resume], while an abandoned connection's statements are
-   still refused, so one queued but unsent is dropped, never sent. A row
-   function that raises while drained has closed the connection; it goes
-   back all the same, to be made again at the next lend, and its exception
-   is returned for the borrower to raise. *)
+   A row function that raises while drained has closed the connection; it
+   goes back all the same, to be made again at the next lend, and its
+   exception is returned for the borrower to raise. *)
 let give_back t e ~cancelled =
   if cancelled && not (C.closed e.conn) then begin
     C.set_timeout e.conn ~timeout_s:t.timeout_s;
@@ -162,7 +160,6 @@ let give_back t e ~cancelled =
     | (_ : (unit, C.error) result) -> None
     | exception ex -> Some (ex, Printexc.get_raw_backtrace ())
   in
-  C.resume e.conn;
   C.set_timeout e.conn ~timeout_s:t.timeout_s;
   if not (C.closed e.conn) then queue_reset t e;
   back t e;

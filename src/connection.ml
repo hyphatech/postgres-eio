@@ -93,8 +93,6 @@ type t = {
   statement_cache : int;
   mutable timeout_s : float option;
   mutable link : link option;
-  (* Set by [abandon]: later statements are refused before sending. *)
-  mutable refusing : bool; [@atomic]
   mutable status : P.transaction_status;
   mutable pid : int;
   mutable key : string;
@@ -936,7 +934,6 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
           statement_cache = Int.max 0 statement_cache;
           timeout_s = Some timeout_s;
           link = None;
-          refusing = false;
           status = P.Idle;
           pid = 0;
           key = "";
@@ -1019,11 +1016,6 @@ let break t e =
       lose link.sent;
       lose link.unsent
 
-let abandoned =
-  Refused
-    "the work this connection was lent for was cancelled, and its statements \
-     are not sent"
-
 (* A cancel request is a connect, perhaps a TLS handshake, and one small
    message on a server that answers within milliseconds; 5 s is far past
    that, and short enough that a caller already given up on waits little
@@ -1050,11 +1042,9 @@ let stop t e =
   Eio.Cancel.protect (fun () ->
       ignore (cancel_given_up t : (unit, error) result))
 
-(* [sending] false: only reads, allowed even while refusing statements. *)
-let run ?(sending = true) t f =
+let run t f =
   match t.link with
   | None -> Error Closed
-  | Some _ when sending && t.refusing -> Error abandoned
   | Some link -> (
       match exchange t link (fun () -> f link) with
       | answer -> answer
@@ -1074,21 +1064,12 @@ let enqueue link bytes reply =
   Buffer.add_string link.out bytes;
   Queue.add reply link.unsent
 
-(* An abandoned borrower's statements never reach the server. *)
-let take_queued t link =
-  if t.refusing then begin
-    Buffer.clear link.out;
-    Queue.iter (fun r -> r.lost abandoned) link.unsent;
-    Queue.clear link.unsent;
-    ""
-  end
-  else begin
-    let bytes = Buffer.contents link.out in
-    if Buffer.length link.out > piece then Buffer.reset link.out
-    else Buffer.clear link.out;
-    Queue.transfer link.unsent link.sent;
-    bytes
-  end
+let take_queued link =
+  let bytes = Buffer.contents link.out in
+  if Buffer.length link.out > piece then Buffer.reset link.out
+  else Buffer.clear link.out;
+  Queue.transfer link.unsent link.sent;
+  bytes
 
 (* Replies are read strictly in send order, through [target]'s or all. *)
 let rec read_through link target =
@@ -1108,7 +1089,7 @@ let rec read_through link target =
    can outgrow them while it is still being written. *)
 let drive ?through t link =
   let last = Queue.fold (fun _ r -> Some r) None link.unsent in
-  let bytes = take_queued t link in
+  let bytes = take_queued link in
   if String.length bytes = 0 then read_through link through
   else if Queue.length link.sent <= 1 && String.length bytes <= piece then begin
     write t link bytes;
@@ -1625,7 +1606,6 @@ module Pipeline = struct
     let answered r = a.result <- Some (finish r) in
     (match conn.link with
     | None -> answered (Error Closed)
-    | Some _ when conn.refusing -> answered (Error abandoned)
     | Some link -> (
         match
           queue_statement conn link sql ~params ~results:[||] ~columns ~init
@@ -1647,7 +1627,7 @@ module Pipeline = struct
     (match (a.result, a.reply) with
     | None, Some reply ->
         ignore
-          (run ~sending:false a.conn (fun link ->
+          (run a.conn (fun link ->
                drive ~through:reply a.conn link;
                Ok ())
             : (unit, error) result)
@@ -1656,14 +1636,14 @@ module Pipeline = struct
 
   (* Also catches a session the server ended while nobody was reading. *)
   let drain conn =
-    run ~sending:false conn (fun link ->
+    run conn (fun link ->
         drive conn link;
         unsolicited conn link;
         Ok ())
 
   let flush conn =
     run conn (fun link ->
-        let bytes = take_queued conn link in
+        let bytes = take_queued link in
         if String.length bytes > 0 then write conn link bytes;
         Ok ())
 end
@@ -2007,12 +1987,6 @@ let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache
 let timeout_s t = t.timeout_s
 let set_timeout t ~timeout_s = t.timeout_s <- timeout_s
-
-let abandon t =
-  t.refusing <- true;
-  cancel_given_up t
-
-let resume t = t.refusing <- false
 
 (* The Terminate is bounded: a server that stopped reading never takes it. *)
 let close t =

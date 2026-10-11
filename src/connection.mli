@@ -2,7 +2,7 @@
 
     Use a connection from one fiber at a time: there is no locking. That fiber
     may be on any domain, not only the one that made the connection. Only
-    {!cancel} and {!abandon} may be called from another fiber.
+    {!cancel} may be called from another fiber.
 
     Every failure is a value. Driver errors and logs never contain parameters,
     passwords, sign-in exchanges or message bytes. The [postgres-eio] log source
@@ -249,15 +249,6 @@ val timeout_s : t -> float option
 val set_timeout : t -> timeout_s:float option -> unit
 (** For long work like a migration: [set_timeout conn ~timeout_s:None]. A pool
     restores the original timeout on return. *)
-
-val abandon : t -> (unit, error) result
-(** From another fiber, cancels the running statement and refuses later ones
-    with [Refused] until {!resume}. For a lender whose borrower went away. The
-    cancel request is given 5 s, or the connection's timeout if that is shorter,
-    even when the timeout is lifted. *)
-
-val resume : t -> unit
-(** Accepts statements again after {!abandon}. *)
 
 val close : t -> unit
 (** Sends Terminate and closes. Unsent statements are dropped and outstanding

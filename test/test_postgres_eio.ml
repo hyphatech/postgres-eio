@@ -2592,25 +2592,6 @@ let a_cancel_request_left_unanswered_is_given_up () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool) "and returned before the server let go" false !let_go
 
-(* The same bound holds for [abandon], called by a lender whose borrower
-   went away, perhaps shielded, and on a connection whose timeout may be
-   lifted. *)
-let an_abandon_left_unanswered_is_given_up () =
-  with_eio @@ fun env sw ->
-  let clock = Eio.Stdenv.mono_clock env in
-  let held = 30. and let_go = ref false in
-  let port, _ =
-    a_fake_postgres env sw
-      ~on_cancel:(fun () ->
-        Eio.Time.Mono.sleep clock held;
-        let_go := true)
-      ()
-  in
-  let t = connect env sw (fake port) in
-  Pg.set_timeout t ~timeout_s:None;
-  ignore (Eio.Cancel.protect (fun () -> Pg.abandon t) : (unit, Pg.error) result);
-  Alcotest.(check bool) "returned before the server let go" false !let_go
-
 (* target_session_attrs: read-write skips a standby; standby finds one. *)
 let the_kind_of_host_asked_for () =
   with_eio @@ fun env sw ->
@@ -4154,33 +4135,6 @@ let drain_and_flush () =
   in_step t;
   Pg.close t
 
-(* From another fiber, abandon cancels the running statement and refuses
-   the next until resume. *)
-let abandoned_until_resumed () =
-  with_eio @@ fun env sw ->
-  let t = connect env sw (plain ()) in
-  let clock = Eio.Stdenv.mono_clock env in
-  let sleep () = Pg.execute t "select pg_sleep(5)" ~params:[] in
-  let running = ref (Ok Pg.Tag.empty) in
-  Eio.Fiber.both
-    (fun () -> running := sleep ())
-    (fun () ->
-      Eio.Time.Mono.sleep clock 0.2;
-      ignore (ok_pg (Pg.abandon t)));
-  Alcotest.(check (option string))
-    "the running one cancelled" (Some "57014")
-    (match !running with
-    | Error (Pg.Server e) -> Some (Pg.Server_error.sqlstate e)
-    | _ -> None);
-  Alcotest.(check bool)
-    "the next refused" true
-    (match Pg.script t "select 1" with
-    | Error (Pg.Refused _) -> true
-    | _ -> false);
-  Pg.resume t;
-  Alcotest.(check string) "and taken after resume" "1" (one t "select 1" []);
-  Pg.close t
-
 (* Any text, NULLs among it, goes in by COPY and comes back as it went,
    against the escaping a hand-picked list could miss. *)
 let any_rows_through_copy () =
@@ -4284,8 +4238,6 @@ let connection_cases =
       a_raising_row_function_is_cancelled_at_the_server;
     Alcotest.test_case "54.2.8 a cancel request left unanswered is given up"
       `Quick a_cancel_request_left_unanswered_is_given_up;
-    Alcotest.test_case "54.2.8 an abandon left unanswered is given up" `Quick
-      an_abandon_left_unanswered_is_given_up;
     Alcotest.test_case "a reset keeps its parameters" `Quick
       a_reset_keeps_its_parameters;
     Alcotest.test_case "a silent server times out" `Quick
@@ -4364,8 +4316,6 @@ let connection_cases =
       executed_for_its_effect;
     Alcotest.test_case "54.2.4 drain reads every answer, flush none" `Quick
       drain_and_flush;
-    Alcotest.test_case "an abandoned connection refuses until resumed" `Quick
-      abandoned_until_resumed;
     Alcotest.test_case "54.2.9 a close sends Terminate" `Quick
       a_close_sends_terminate;
     Alcotest.test_case "54.2.6 any rows, through COPY and back" `Quick
@@ -4467,7 +4417,7 @@ let a_held_pool_is_busy_then_serves () =
 
 (* A cancelled borrow cancels its statement at the server, and the
    connection returns idle. *)
-let an_abandoned_statement_is_stopped_at_the_server () =
+let a_cancelled_borrowers_statement_is_stopped_at_the_server () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
   let clock = Eio.Stdenv.mono_clock env in
@@ -4479,7 +4429,7 @@ let an_abandoned_statement_is_stopped_at_the_server () =
                 Pg.execute t "select pg_sleep(5)" ~params:[])))
    with
   | Error `Timeout -> ()
-  | Ok _ -> Alcotest.fail "the borrow was not abandoned");
+  | Ok _ -> Alcotest.fail "the borrow was not cancelled");
   let took = seconds_since clock started in
   Alcotest.(check bool)
     (Printf.sprintf "ended at the server, in %.2fs" took)
@@ -5002,7 +4952,7 @@ let a_cancelled_reconnect_in_another_domain () =
 
 (* A borrow cancelled on another domain stops its statement at the
    server. *)
-let an_abandoned_borrow_in_another_domain () =
+let a_cancelled_borrow_in_another_domain () =
   with_eio @@ fun env sw ->
   let p = shared_pool env sw in
   let clock = Eio.Stdenv.mono_clock env in
@@ -5168,8 +5118,8 @@ let pool_cases =
       a_reconnect_in_another_domain;
     Alcotest.test_case "a cancelled reconnect in another domain" `Quick
       a_cancelled_reconnect_in_another_domain;
-    Alcotest.test_case "an abandoned borrow in another domain" `Quick
-      an_abandoned_borrow_in_another_domain;
+    Alcotest.test_case "a cancelled borrow in another domain" `Quick
+      a_cancelled_borrow_in_another_domain;
     Alcotest.test_case "a TLS connection in another domain" `Quick
       a_tls_connection_in_another_domain;
     Alcotest.test_case "a connection used in another domain" `Quick
@@ -5178,8 +5128,9 @@ let pool_cases =
       the_pool_says_when_it_is_in_trouble;
     Alcotest.test_case "a held pool is busy, then serves" `Quick
       a_held_pool_is_busy_then_serves;
-    Alcotest.test_case "an abandoned statement is stopped at the server" `Quick
-      an_abandoned_statement_is_stopped_at_the_server;
+    Alcotest.test_case
+      "a cancelled borrower's statement is stopped at the server" `Quick
+      a_cancelled_borrowers_statement_is_stopped_at_the_server;
     Alcotest.test_case "a cancelled borrower returns at the cancellation" `Quick
       a_cancelled_borrower_returns_at_the_cancellation;
     Alcotest.test_case "a cancelled borrower is not held by its cancel" `Quick

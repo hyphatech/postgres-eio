@@ -1,5 +1,12 @@
 # Changes
 
+## Unreleased
+
+- Breaking: `abandon` and `resume` are gone. The pool has stopped a
+  cancelled borrower through Eio cancellation since 0.2.0, and nothing
+  else called them. To stop a statement, cancel the fiber running it: the
+  statement is cancelled at the server and the connection closed.
+
 ## 0.2.0 (2026-10-11)
 
 - Breaking: OCaml 5.5 or later is required. The opam files asked for 5.4,
