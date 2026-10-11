@@ -25,18 +25,18 @@ val create :
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.Mono.t ->
   ?parameters:(string * string) list ->
-  ?timeout_s:float ->
+  ?timeout:Mtime.Span.t ->
   ?statement_cache:int ->
   ?size:int ->
-  ?wait_s:float ->
+  ?wait:Mtime.Span.t ->
   ?reset:bool ->
-  ?max_lifetime_s:float ->
-  ?idle_check_s:float ->
+  ?max_lifetime:Mtime.Span.t ->
+  ?idle_check:Mtime.Span.t ->
   Conninfo.t ->
   (t, Connection.error) result
 (** Opens [size] (8) connections, and at least one, as {!Postgres_eio.connect}
-    does, or returns the first error after closing those already open. [wait_s]
-    (5) is the default borrow wait.
+    does, or returns the first error after closing those already open. [wait] (5
+    s) is the default borrow wait.
 
     On return, a reset is sent but not awaited: [DISCARD ALL] minus prepared
     statements and plans, which borrowers share
@@ -48,14 +48,15 @@ val create :
     rolled back and [LISTEN] ended regardless: a pooled connection never
     listens.
 
-    A daemon fiber on [sw] checks idle connections a few times per
-    [min idle_check_s max_lifetime_s]. Connections past [max_lifetime_s] (1800,
+    A daemon fiber on [sw] checks idle connections a few times per the shorter
+    of [idle_check] and [max_lifetime]. Connections past [max_lifetime] (30 min,
     ±10%) are replaced, the new one connected before the old is removed.
-    Connections idle past [idle_check_s] (60) are pinged with an empty query,
+    Connections idle past [idle_check] (60 s) are pinged with an empty query,
     while another is idle, and replaced if it fails. Borrowed connections are
     never touched. *)
 
-val use : ?wait_s:float -> t -> (Connection.t -> 'a) -> ('a, [> error ]) result
+val use :
+  ?wait:Mtime.Span.t -> t -> (Connection.t -> 'a) -> ('a, [> error ]) result
 (** Borrows a connection, runs [f] on the calling fiber, and returns it, even if
     [f] raises. [`Pool `Busy] if none came free within the wait, and
     [`Pool `Closed] at once if the pool is closed, or closes while the borrow

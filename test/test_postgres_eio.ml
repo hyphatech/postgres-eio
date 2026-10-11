@@ -627,7 +627,9 @@ let show_conninfo (t : Conninfo.t) =
     t.database
     (Conninfo.ssl_mode_to_string t.ssl_mode)
     (Option.value t.ssl_root_cert ~default:"-")
-    (Option.fold ~none:"-" ~some:string_of_float t.connect_timeout_s)
+    (Option.fold ~none:"-"
+       ~some:(Format.asprintf "%a" Mtime.Span.pp)
+       t.connect_timeout)
     (Option.value t.application_name ~default:"-")
     (String.concat "" (List.map (( ^ ) " ") extra))
 
@@ -648,7 +650,7 @@ let conninfo_cases =
     reads "a URL, every part"
       "postgres://app:p%40ss%20word@db.example:6543/go?sslmode=verify-full&sslrootcert=/ca.pem&connect_timeout=3&application_name=demo"
       "tcp db.example port=6543 user=app password=p@ss word dbname=go \
-       sslmode=verify-full root=/ca.pem timeout=3. app=demo";
+       sslmode=verify-full root=/ca.pem timeout=3s app=demo";
     reads "postgresql:// too, and its defaults" "postgresql://app@db"
       "tcp db port=5432 user=app password=- dbname=app sslmode=prefer root=- \
        timeout=- app=-";
@@ -805,6 +807,56 @@ let conninfo_cases =
     refuses "a port in hex" "user=app port=0x1538" "not a port";
     refuses "a connect_timeout in hex" "user=app connect_timeout=0x10"
       "not a number of seconds";
+    Alcotest.test_case "connect_timeout is whole seconds, as libpq reads it"
+      `Quick (fun () ->
+        let read s =
+          match Conninfo.of_string ("user=app connect_timeout=" ^ s) with
+          | Ok t -> t.connect_timeout
+          | Error e -> Alcotest.fail e
+        in
+        let span =
+          Alcotest.(option (testable Mtime.Span.pp Mtime.Span.equal))
+        in
+        Alcotest.check span "seconds" (Some Mtime.Span.(90 * s)) (read "90");
+        Alcotest.check span "zero is absent" None (read "0");
+        Alcotest.check span "below zero is absent" None (read "-3");
+        Alcotest.check span "past a span is the longest"
+          (Some Mtime.Span.max_span) (read "99999999999"));
+    Alcotest.test_case "to_url writes connect_timeout in seconds, rounded up"
+      `Quick (fun () ->
+        let written span =
+          match Conninfo.of_string "user=app" with
+          | Error e -> Alcotest.fail e
+          | Ok t ->
+              let url =
+                Conninfo.to_url { t with connect_timeout = Some span }
+              in
+              let key = "connect_timeout=" in
+              let rec find i =
+                if i + String.length key > String.length url then
+                  Alcotest.failf "no connect_timeout in %s" url
+                else if String.equal (String.sub url i (String.length key)) key
+                then
+                  let start = i + String.length key in
+                  let stop =
+                    Option.value
+                      (String.index_from_opt url start '&')
+                      ~default:(String.length url)
+                  in
+                  String.sub url start (stop - start)
+                else find (i + 1)
+              in
+              find 0
+        in
+        Alcotest.(check string) "whole" "3" (written Mtime.Span.(3 * s));
+        Alcotest.(check string)
+          "a part rounds up" "2"
+          (written Mtime.Span.(1500 * ms));
+        Alcotest.(check string)
+          "a nanosecond is a second" "1" (written Mtime.Span.ns);
+        Alcotest.(check string)
+          "the longest" "18446744074"
+          (written Mtime.Span.max_span));
     refuses "an sslmode that is none of them" "user=app sslmode=maybe" "sslmode";
     refuses "an unterminated quote" "user=app password='open" "closing quote";
     refuses "a key with no =" "user=app dbname" "no =";
@@ -898,7 +950,7 @@ let a_url_reads_back =
           channel_binding = Binding_required;
           require_auth =
             { password = false; md5 = true; scram_sha_256 = true; none = false };
-          connect_timeout_s = Some 4.;
+          connect_timeout = Some Mtime.Span.(4 * s);
           application_name = Some "demo app";
           keepalives = false;
           target_session_attrs = Prefer_standby;
@@ -1346,20 +1398,27 @@ let with_eio f =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw -> f env sw
 
-let seconds_since clock started =
-  Mtime.Span.to_float_ns (Mtime.span started (Eio.Time.Mono.now clock)) /. 1e9
+let since clock started = Mtime.span started (Eio.Time.Mono.now clock)
 
-let connect_with ?parameters ?timeout_s env sw c =
+(* Bounds far past what the work takes, so a check turns on whether the
+   bound applied, not on how fast the machine is. *)
+let shorter what took ~than =
+  Alcotest.(check bool)
+    (Format.asprintf "%s, in %a" what Mtime.Span.pp took)
+    true
+    (Mtime.Span.is_shorter took ~than)
+
+let connect_with ?parameters ?timeout env sw c =
   Pg.connect ~sw ~net:(Eio.Stdenv.net env)
     ~clock:(Eio.Stdenv.mono_clock env)
-    ?parameters ?timeout_s c
+    ?parameters ?timeout c
 
 let ok_pg = function
   | Ok v -> v
   | Error e -> Alcotest.failf "%s" (Pg.error_to_string e)
 
-let connect ?parameters ?timeout_s env sw c =
-  ok_pg (connect_with ?parameters ?timeout_s env sw c)
+let connect ?parameters ?timeout env sw c =
+  ok_pg (connect_with ?parameters ?timeout env sw c)
 
 let rows t sql params =
   let rows, _ =
@@ -1640,19 +1699,15 @@ let a_running_statement_is_cancelled () =
       answer :=
         Pg.query t "select pg_sleep(5)" ~params:[] ~init:[] ~row:(fun a _ -> a))
     (fun () ->
-      Eio.Time.Mono.sleep clock 0.2;
+      Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
       ok_pg (Pg.cancel t));
-  let took =
-    Mtime.Span.to_float_ns (Mtime.span started (Eio.Time.Mono.now clock)) /. 1e9
-  in
+  let took = since clock started in
   (match !answer with
   | Error (Pg.Server e) ->
       Alcotest.(check string) "cancelled" "57014" (Pg.Server_error.sqlstate e)
   | Error e -> Alcotest.failf "not cancelled: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "the statement ran to its end");
-  Alcotest.(check bool)
-    (Printf.sprintf "at once, in %.2fs" took)
-    true (took < 2.);
+  shorter "at once" took ~than:Mtime.Span.(2 * s);
   Alcotest.(check bool)
     "idle" true
     (match Pg.status t with P.Idle -> true | _ -> false);
@@ -1672,7 +1727,7 @@ let a_cancel_over_tls () =
       answer :=
         Pg.query t "select pg_sleep(5)" ~params:[] ~init:[] ~row:(fun a _ -> a))
     (fun () ->
-      Eio.Time.Mono.sleep clock 0.2;
+      Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
       ok_pg (Pg.cancel t));
   (match !answer with
   | Error (Pg.Server e) ->
@@ -1719,56 +1774,56 @@ let a_silent_server_times_out () =
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
   (match
-     connect_with ~timeout_s:0.3 env sw (at ~port (Tcp "127.0.0.1") (plain ()))
+     connect_with
+       ~timeout:Mtime.Span.(300 * ms)
+       env sw
+       (at ~port (Tcp "127.0.0.1") (plain ()))
    with
   | Error Pg.Timeout -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to nothing");
-  let took =
-    Mtime.Span.to_float_ns (Mtime.span started (Eio.Time.Mono.now clock)) /. 1e9
-  in
-  Alcotest.(check bool)
-    (Printf.sprintf "within the bound, in %.2fs" took)
-    true (took < 2.)
+  let took = since clock started in
+  shorter "within the bound" took ~than:Mtime.Span.(2 * s)
 
 (* The fake never answers, so how long connecting takes is the bound that
    applied to the attempt. *)
-let timed_out_after env sw ?timeout_s connect_timeout_s =
+let timed_out_after env sw ?timeout connect_timeout =
   let port, _, _ = a_fake_server env sw ~answer:None in
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
   (match
-     connect_with ?timeout_s env sw
-       { (at ~port (Tcp "127.0.0.1") (plain ())) with connect_timeout_s }
+     connect_with ?timeout env sw
+       { (at ~port (Tcp "127.0.0.1") (plain ())) with connect_timeout }
    with
   | Error Pg.Timeout -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to nothing");
-  seconds_since clock started
+  since clock started
 
 let connect_timeout_bounds_an_attempt () =
   with_eio @@ fun env sw ->
-  let took = timed_out_after env sw ~timeout_s:30. (Some 0.3) in
-  Alcotest.(check bool)
-    (Printf.sprintf "within connect_timeout, in %.2fs" took)
-    true (took < 2.)
+  let took =
+    timed_out_after env sw
+      ~timeout:Mtime.Span.(30 * s)
+      (Some Mtime.Span.(300 * ms))
+  in
+  shorter "within connect_timeout" took ~than:Mtime.Span.(2 * s)
 
-let a_connect_timeout_not_positive_is_the_timeout () =
+let a_connect_timeout_of_zero_is_the_timeout () =
   with_eio @@ fun env sw ->
-  List.iter
-    (fun s ->
-      let took = timed_out_after env sw ~timeout_s:0.5 (Some s) in
-      Alcotest.(check bool)
-        (Printf.sprintf "connect_timeout %g waited for timeout_s, in %.2fs" s
-           took)
-        true
-        (took >= 0.4 && took < 2.))
-    [ 0.; -1. ]
+  let took =
+    timed_out_after env sw ~timeout:Mtime.Span.(500 * ms) (Some Mtime.Span.zero)
+  in
+  Alcotest.(check bool)
+    (Format.asprintf "waited for the timeout, in %a" Mtime.Span.pp took)
+    true
+    (Mtime.Span.is_longer took ~than:Mtime.Span.(400 * ms)
+    && Mtime.Span.is_shorter took ~than:Mtime.Span.(2 * s))
 
 let a_read_past_the_timeout () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
-  Pg.set_timeout t ~timeout_s:(Some 0.3);
+  Pg.set_timeout t ~timeout:(Some Mtime.Span.(300 * ms));
   Alcotest.(check bool)
     "a timeout" true
     (match Pg.execute t "select pg_sleep(2)" ~params:[] with
@@ -1777,7 +1832,7 @@ let a_read_past_the_timeout () =
   Alcotest.(check bool)
     "and the connection closed, out of step" true (Pg.closed t);
   ok_pg (Pg.reset t);
-  Pg.set_timeout t ~timeout_s:None;
+  Pg.set_timeout t ~timeout:None;
   Alcotest.(check string)
     "lifted, a long statement runs" ""
     (one t "select pg_sleep(0.5)::text" []);
@@ -1786,8 +1841,9 @@ let a_read_past_the_timeout () =
 (* An unclosed connection's timer does not keep its switch alive. *)
 let a_connection_left_open_lets_its_switch_finish () =
   with_eio @@ fun env _ ->
-  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-      Eio.Switch.run (fun sw -> ignore (connect env sw (plain ()))))
+  Eio.Time.Timeout.run_exn
+    (Eio.Time.Timeout.v (Eio.Stdenv.mono_clock env) Mtime.Span.(5 * s))
+    (fun () -> Eio.Switch.run (fun sw -> ignore (connect env sw (plain ()))))
 
 (* A caller's cancellation propagates as is, never as [Timeout]. *)
 let a_cancellation_from_outside_is_not_a_timeout () =
@@ -1801,12 +1857,13 @@ let a_cancellation_from_outside_is_not_a_timeout () =
       | exception (Eio.Cancel.Cancelled _ as ex) ->
           raised := true;
           raise ex)
-    (fun () -> Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.2);
+    (fun () ->
+      Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(200 * ms));
   Alcotest.(check bool) "the cancellation raised" true !raised;
   Alcotest.(check bool) "and the connection closed" true (Pg.closed t)
 
 (* Whether backend [pid] still runs a statement, asked from another
-   connection until it stops or [within] seconds pass. [within] is far
+   connection until it stops or [within] passes. [within] is far
    below the statement's own length, so the answer turns on whether it was
    cancelled, not on how fast the machine is. The backend is then
    terminated, so a statement left running does not outlive the case. *)
@@ -1823,9 +1880,9 @@ let still_running env sw pid ~within =
   in
   let rec wait () =
     if not (running ()) then false
-    else if seconds_since clock started > within then true
+    else if Mtime.Span.is_longer (since clock started) ~than:within then true
     else begin
-      Eio.Time.Mono.sleep clock 0.05;
+      Eio.Time.Mono.sleep_span clock Mtime.Span.(50 * ms);
       wait ()
     end
   in
@@ -1838,7 +1895,7 @@ let still_running env sw pid ~within =
    server, which would otherwise run it to its end for nobody. *)
 let a_timed_out_statement_is_cancelled_at_the_server () =
   with_eio @@ fun env sw ->
-  let t = connect ~timeout_s:0.5 env sw (plain ()) in
+  let t = connect ~timeout:Mtime.Span.(500 * ms) env sw (plain ()) in
   let pid = one t "select pg_backend_pid()::text" [] in
   (match Pg.execute t "select pg_sleep(60)" ~params:[] with
   | Error Pg.Timeout -> ()
@@ -1847,7 +1904,7 @@ let a_timed_out_statement_is_cancelled_at_the_server () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool)
     "and stopped at the server" false
-    (still_running env sw pid ~within:10.)
+    (still_running env sw pid ~within:Mtime.Span.(10 * s))
 
 (* So does an Eio cancellation of an exchange under way. *)
 let a_cancelled_exchange_is_cancelled_at_the_server () =
@@ -1856,11 +1913,12 @@ let a_cancelled_exchange_is_cancelled_at_the_server () =
   let pid = one t "select pg_backend_pid()::text" [] in
   Eio.Fiber.first
     (fun () -> ignore (Pg.execute t "select pg_sleep(60)" ~params:[]))
-    (fun () -> Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.2);
+    (fun () ->
+      Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(200 * ms));
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool)
     "and stopped at the server" false
-    (still_running env sw pid ~within:10.)
+    (still_running env sw pid ~within:Mtime.Span.(10 * s))
 
 (* So does a row function that raises: the rows after it are never read,
    and the statement would run on for nobody. The first row is long
@@ -1883,7 +1941,7 @@ let a_raising_row_function_is_cancelled_at_the_server () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool)
     "and stopped at the server" false
-    (still_running env sw pid ~within:10.)
+    (still_running env sw pid ~within:Mtime.Span.(10 * s))
 
 let a_server_error_keeps_the_connection () =
   with_eio @@ fun env sw ->
@@ -2263,7 +2321,8 @@ let a_cancelled_copy_closes () =
   in
   Eio.Fiber.first
     (fun () -> ignore (Pg.copy_in_rows t ~table:"c" ~columns:[ "n" ] forever))
-    (fun () -> Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.2);
+    (fun () ->
+      Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(200 * ms));
   Alcotest.(check bool) "closed" true (Pg.closed t);
   ok_pg (Pg.reset t);
   in_step t;
@@ -2287,7 +2346,7 @@ let cancelled env t =
   Eio.Fiber.both
     (fun () -> answer := Pg.execute t "select pg_sleep(5)" ~params:[])
     (fun () ->
-      Eio.Time.Mono.sleep clock 0.2;
+      Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
       ok_pg (Pg.cancel t));
   match !answer with
   | Error (Pg.Server e) ->
@@ -2571,24 +2630,24 @@ let a_refused_address_leaves_no_socket () =
 
 (* A server that takes a cancel request and never closes its connection
    does not hold a cancelled caller, even with the timeout lifted: the
-   request has a bound of its own. The fake lets go after [held] seconds,
+   request has a bound of its own. The fake lets go after [held],
    far past that bound, so a caller still waiting then was unbounded. *)
 let a_cancel_request_left_unanswered_is_given_up () =
   with_eio @@ fun env sw ->
   let clock = Eio.Stdenv.mono_clock env in
-  let held = 30. and let_go = ref false in
+  let held = Mtime.Span.(30 * s) and let_go = ref false in
   let port, _ =
     a_fake_postgres env sw
       ~on_cancel:(fun () ->
-        Eio.Time.Mono.sleep clock held;
+        Eio.Time.Mono.sleep_span clock held;
         let_go := true)
       ()
   in
   let t = connect env sw (fake port) in
-  Pg.set_timeout t ~timeout_s:None;
+  Pg.set_timeout t ~timeout:None;
   Eio.Fiber.first
     (fun () -> ignore (Pg.execute t "select pg_sleep(60)" ~params:[]))
-    (fun () -> Eio.Time.Mono.sleep clock 0.2);
+    (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms));
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool) "and returned before the server let go" false !let_go
 
@@ -2747,19 +2806,19 @@ let saslprep_as_the_server_does () =
 
 (* LISTEN/NOTIFY *)
 
-let listener ?heartbeat_s ?timeout_s env sw c =
+let listener ?heartbeat ?timeout env sw c =
   ok_pg
     (Pg.Listener.connect ~sw ~net:(Eio.Stdenv.net env)
        ~clock:(Eio.Stdenv.mono_clock env)
-       ?heartbeat_s ?timeout_s c)
+       ?heartbeat ?timeout c)
 
-(* Fails after [within] seconds instead of hanging. *)
-let next_within env ?(within = 5.) l =
+(* Fails after [within] instead of hanging. *)
+let next_within env ?(within = Mtime.Span.(5 * s)) l =
   Eio.Fiber.first
     (fun () -> Pg.Listener.next l)
     (fun () ->
-      Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) within;
-      Alcotest.failf "no event within %gs" within)
+      Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) within;
+      Alcotest.failf "no event within %a" Mtime.Span.pp within)
 
 let heard env ?within l =
   match next_within env ?within l with
@@ -2862,9 +2921,10 @@ let what_arrives_during_a_listen_is_kept () =
   ok_pg (Pg.Listener.listen l "pgeio_a");
   let n = connect env sw (plain ()) in
   notify n "pgeio_a" "early";
-  Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.2;
+  Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(200 * ms);
   ok_pg (Pg.Listener.listen l "pgeio_b");
-  Alcotest.(check string) "kept" "early" (heard env ~within:1. l).payload;
+  Alcotest.(check string)
+    "kept" "early" (heard env ~within:Mtime.Span.s l).payload;
   Pg.Listener.close l;
   Pg.close n
 
@@ -2889,15 +2949,20 @@ let a_silent_network_is_found () =
   with_eio @@ fun env sw ->
   let port, silence = a_proxy env sw in
   let c = at ~port (Tcp "127.0.0.1") (plain ()) in
-  let l = listener ~heartbeat_s:0.3 ~timeout_s:0.5 env sw c in
+  let l =
+    listener
+      ~heartbeat:Mtime.Span.(300 * ms)
+      ~timeout:Mtime.Span.(500 * ms)
+      env sw c
+  in
   ok_pg (Pg.Listener.listen l "pgeio_silent");
   let clock = Eio.Stdenv.mono_clock env in
   silence ();
   let started = Eio.Time.Mono.now clock in
   reconnected env l;
-  let took = seconds_since clock started in
-  if took > 0.3 +. 0.5 +. 0.5 then
-    Alcotest.failf "found after %.2fs, past the heartbeat and the timeout" took;
+  shorter "found within the heartbeat, the timeout and half a second"
+    (since clock started)
+    ~than:Mtime.Span.(1300 * ms);
   let n = connect env sw (plain ()) in
   notify n "pgeio_silent" "after";
   Alcotest.(check string) "and hears again" "after" (heard env l).payload;
@@ -2911,16 +2976,18 @@ let a_quiet_listener_outlives_its_heartbeats () =
   with_eio @@ fun env sw ->
   List.iter
     (fun (said, c) ->
-      let l = listener ~heartbeat_s:0.2 env sw c in
+      let l = listener ~heartbeat:Mtime.Span.(200 * ms) env sw c in
       ok_pg (Pg.Listener.listen l "pgeio_quiet");
       let n = connect env sw (plain ()) in
       Eio.Fiber.both
         (fun () ->
           Alcotest.(check string)
             (said ^ ": heard after five heartbeats")
-            "after" (heard env ~within:5. l).payload)
+            "after" (heard env ~within:Mtime.Span.(5 * s) l).payload)
         (fun () ->
-          Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 1.;
+          Eio.Time.Mono.sleep_span
+            (Eio.Stdenv.mono_clock env)
+            Mtime.Span.(1 * s);
           notify n "pgeio_quiet" "after");
       Pg.Listener.close l;
       Pg.close n)
@@ -2944,7 +3011,7 @@ let a_cancelled_wait_keeps_listening () =
           match Pg.Listener.next l with
           | Ok _ -> Alcotest.failf "%s: an event before any was sent" said
           | Error e -> Alcotest.failf "%s: %s" said (Pg.error_to_string e))
-        (fun () -> Eio.Time.Mono.sleep clock 0.1);
+        (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(100 * ms));
       let n = connect env sw (plain ()) in
       notify n "pgeio_raced" "after";
       Alcotest.(check string)
@@ -2957,25 +3024,25 @@ let a_cancelled_wait_keeps_listening () =
       ("in the clear", plain ());
     ]
 
-(* Races [next] against a tick of [tick_s] until it returns, or fails after
-   [within] seconds. *)
-let raced env ~tick_s ?(within = 5.) l =
+(* Races [next] against a tick of [tick] until it returns, or fails after
+   [within]. *)
+let raced env ~tick ?(within = Mtime.Span.(5 * s)) l =
   let clock = Eio.Stdenv.mono_clock env in
   let rec loop () =
     match
       Eio.Fiber.first
         (fun () -> Some (Pg.Listener.next l))
         (fun () ->
-          Eio.Time.Mono.sleep clock tick_s;
+          Eio.Time.Mono.sleep_span clock tick;
           None)
     with
     | None -> loop ()
     | Some answer -> answer
   in
   Eio.Fiber.first loop (fun () ->
-      Eio.Time.Mono.sleep clock within;
-      Alcotest.failf "no event within %gs of a loop ticking every %gs" within
-        tick_s)
+      Eio.Time.Mono.sleep_span clock within;
+      Alcotest.failf "no event within %a of a loop ticking every %a"
+        Mtime.Span.pp within Mtime.Span.pp tick)
 
 (* A loop that races [next] against a tick shorter than the heartbeat still
    sends one, since the heartbeat counts from the last byte heard, not from
@@ -2991,9 +3058,14 @@ let a_racing_loop_notices_a_silent_server () =
         else "")
       ()
   in
-  let l = listener ~heartbeat_s:0.2 ~timeout_s:0.2 env sw (fake port) in
+  let l =
+    listener
+      ~heartbeat:Mtime.Span.(200 * ms)
+      ~timeout:Mtime.Span.(200 * ms)
+      env sw (fake port)
+  in
   ok_pg (Pg.Listener.listen l "pgeio_ticking");
-  (match raced env ~tick_s:0.05 l with
+  (match raced env ~tick:Mtime.Span.(50 * ms) l with
   | Ok Pg.Listener.Reconnected -> ()
   | Ok (Pg.Listener.Notification n) -> Alcotest.failf "heard %S" n.payload
   | Error e -> Alcotest.failf "%s" (Pg.error_to_string e));
@@ -3013,20 +3085,27 @@ let a_tick_does_not_cut_a_heartbeat () =
           msg 'C' (cstr "LISTEN") ^ msg 'Z' "I"
         else begin
           incr heartbeats;
-          Eio.Time.Mono.sleep clock 0.2;
+          Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
           msg 'I' "" ^ msg 'Z' "I"
         end)
       ()
   in
-  let l = listener ~heartbeat_s:0.1 ~timeout_s:2. env sw (fake port) in
+  let l =
+    listener
+      ~heartbeat:Mtime.Span.(100 * ms)
+      ~timeout:Mtime.Span.(2 * s)
+      env sw (fake port)
+  in
   ok_pg (Pg.Listener.listen l "pgeio_slow");
   Eio.Fiber.first
     (fun () ->
-      match raced env ~tick_s:0.05 ~within:10. l with
+      match
+        raced env ~tick:Mtime.Span.(50 * ms) ~within:Mtime.Span.(10 * s) l
+      with
       | Ok Pg.Listener.Reconnected -> Alcotest.fail "reconnected"
       | Ok (Pg.Listener.Notification n) -> Alcotest.failf "heard %S" n.payload
       | Error e -> Alcotest.failf "%s" (Pg.error_to_string e))
-    (fun () -> Eio.Time.Mono.sleep clock 1.5);
+    (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(1500 * ms));
   if !heartbeats < 2 then
     Alcotest.failf "%d heartbeats, where the loop should send several"
       !heartbeats;
@@ -3053,7 +3132,12 @@ let a_server_starting_up_is_waited_for () =
         else "")
       ()
   in
-  let l = listener ~heartbeat_s:0.1 ~timeout_s:0.2 env sw (fake port) in
+  let l =
+    listener
+      ~heartbeat:Mtime.Span.(100 * ms)
+      ~timeout:Mtime.Span.(200 * ms)
+      env sw (fake port)
+  in
   ok_pg (Pg.Listener.listen l "pgeio_restart");
   reconnected env l;
   Pg.Listener.close l
@@ -3073,7 +3157,7 @@ let a_refused_sign_in_is_returned () =
   let admin = connect env sw (plain ()) in
   script admin "alter role pgeio_listener password 'second'";
   terminate_by_name admin "pgeio-refused";
-  (match next_within env ~within:2. l with
+  (match next_within env ~within:Mtime.Span.(2 * s) l with
   | Error (Pg.Server e) ->
       Alcotest.(check string)
         "the server's refusal" "28P01"
@@ -3099,7 +3183,12 @@ let a_notification_read_with_an_answer () =
         else "")
       ()
   in
-  let l = listener ~heartbeat_s:0.1 ~timeout_s:0.1 env sw (fake port) in
+  let l =
+    listener
+      ~heartbeat:Mtime.Span.(100 * ms)
+      ~timeout:Mtime.Span.(100 * ms)
+      env sw (fake port)
+  in
   ok_pg (Pg.Listener.listen l "pgeio_along");
   Alcotest.(check string)
     "heard before any heartbeat" "along" (heard env l).payload;
@@ -3138,11 +3227,11 @@ let ours t =
   | [ [ Some n ] ] -> int_of_string n
   | _ -> Alcotest.fail "a count"
 
-let connect_cached ?statement_cache ?timeout_s env sw c =
+let connect_cached ?statement_cache ?timeout env sw c =
   ok_pg
     (Pg.connect ~sw ~net:(Eio.Stdenv.net env)
        ~clock:(Eio.Stdenv.mono_clock env)
-       ?statement_cache ?timeout_s c)
+       ?statement_cache ?timeout c)
 
 let value t sql params =
   match rows t sql params with
@@ -3510,7 +3599,7 @@ let longer_than_the_buffers () =
   with_eio @@ fun env sw ->
   let size = 16384 in
   let c = a_server_that_answers_big env sw ~size in
-  let t = connect_cached ~timeout_s:2. env sw c in
+  let t = connect_cached ~timeout:Mtime.Span.(2 * s) env sw c in
   let param = Some (String.make size 'p') in
   let answers =
     List.init 2000 (fun _ ->
@@ -3577,12 +3666,12 @@ let a_copy_the_server_answers_as_it_goes () =
 (* A row function slower than the timeout does not time out. *)
 let a_slow_row_function_is_not_timed () =
   with_eio @@ fun env sw ->
-  let t = connect_cached ~timeout_s:0.2 env sw (plain ()) in
+  let t = connect_cached ~timeout:Mtime.Span.(200 * ms) env sw (plain ()) in
   let clock = Eio.Stdenv.mono_clock env in
   (match
      Pg.query t "select generate_series(1, 3)" ~params:[] ~init:0
        ~row:(fun n _ ->
-         Eio.Time.Mono.sleep clock 0.3;
+         Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms);
          n + 1)
    with
   | Ok (3, _) -> ()
@@ -4244,8 +4333,8 @@ let connection_cases =
       a_silent_server_times_out;
     Alcotest.test_case "connect_timeout bounds an attempt" `Quick
       connect_timeout_bounds_an_attempt;
-    Alcotest.test_case "a connect_timeout not positive is the timeout" `Quick
-      a_connect_timeout_not_positive_is_the_timeout;
+    Alcotest.test_case "a connect_timeout of zero is the timeout" `Quick
+      a_connect_timeout_of_zero_is_the_timeout;
     Alcotest.test_case "a read past the timeout" `Quick a_read_past_the_timeout;
     Alcotest.test_case "a connection left open lets its switch finish" `Quick
       a_connection_left_open_lets_its_switch_finish;
@@ -4381,12 +4470,12 @@ let connection_cases =
 
 (* The pool *)
 
-let pool ?parameters ?(size = 1) ?(wait_s = 2.) ?reset ?max_lifetime_s
-    ?idle_check_s env sw =
+let pool ?parameters ?(size = 1) ?(wait = Mtime.Span.(2 * s)) ?reset
+    ?max_lifetime ?idle_check env sw =
   ok_pg
     (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
        ~clock:(Eio.Stdenv.mono_clock env)
-       ?parameters ~size ~wait_s ?reset ?max_lifetime_s ?idle_check_s (plain ()))
+       ?parameters ~size ~wait ?reset ?max_lifetime ?idle_check (plain ()))
 
 let borrow p f =
   match Pg.Pool.use p f with
@@ -4396,11 +4485,12 @@ let borrow p f =
 (* An exhausted pool returns [`Pool `Busy] within its wait, then recovers. *)
 let a_held_pool_is_busy_then_serves () =
   with_eio @@ fun env sw ->
-  let p = pool ~wait_s:0.2 env sw in
+  let p = pool ~wait:Mtime.Span.(200 * ms) env sw in
   let clock = Eio.Stdenv.mono_clock env in
   let answer = ref (Ok ()) in
   Eio.Fiber.both
-    (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.5))
+    (fun () ->
+      borrow p (fun _ -> Eio.Time.Mono.sleep_span clock Mtime.Span.(500 * ms)))
     (fun () -> answer := Pg.Pool.use p (fun _ -> ()));
   (match !answer with
   | Error (`Pool `Busy as e) ->
@@ -4423,17 +4513,16 @@ let a_cancelled_borrowers_statement_is_stopped_at_the_server () =
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
   (match
-     Eio.Time.with_timeout (Eio.Stdenv.clock env) 0.3 (fun () ->
+     Eio.Time.Timeout.run
+       (Eio.Time.Timeout.v clock Mtime.Span.(300 * ms))
+       (fun () ->
          Ok
            (Pg.Pool.use p (fun t ->
                 Pg.execute t "select pg_sleep(5)" ~params:[])))
    with
   | Error `Timeout -> ()
   | Ok _ -> Alcotest.fail "the borrow was not cancelled");
-  let took = seconds_since clock started in
-  Alcotest.(check bool)
-    (Printf.sprintf "ended at the server, in %.2fs" took)
-    true (took < 2.);
+  shorter "ended at the server" (since clock started) ~than:Mtime.Span.(2 * s);
   borrow p (fun t ->
       Alcotest.(check bool)
         "idle" true
@@ -4444,32 +4533,33 @@ let a_cancelled_borrowers_statement_is_stopped_at_the_server () =
 (* A borrower that lifted its connection's timeout and is cancelled
    between exchanges is not held by a cancel request the server never
    closes: the request has the pool's timeout. The fake lets go after
-   [held] seconds, far past it. *)
+   [held], far past it. *)
 let a_cancelled_borrower_is_not_held_by_its_cancel () =
   with_eio @@ fun env sw ->
   let clock = Eio.Stdenv.mono_clock env in
-  let held = 30. and let_go = ref false in
+  let held = Mtime.Span.(30 * s) and let_go = ref false in
   let port, _ =
     a_fake_postgres env sw
       ~on_cancel:(fun () ->
-        Eio.Time.Mono.sleep clock held;
+        Eio.Time.Mono.sleep_span clock held;
         let_go := true)
       ()
   in
   let p =
     ok_pg
-      (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env) ~clock ~timeout_s:0.5
+      (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env) ~clock
+         ~timeout:Mtime.Span.(500 * ms)
          ~size:1 (fake port))
   in
   Eio.Fiber.first
     (fun () ->
       match
         Pg.Pool.use p (fun t ->
-            Pg.set_timeout t ~timeout_s:None;
-            Eio.Time.Mono.sleep clock held)
+            Pg.set_timeout t ~timeout:None;
+            Eio.Time.Mono.sleep_span clock held)
       with
       | Ok () | Error (`Pool _) -> ())
-    (fun () -> Eio.Time.Mono.sleep clock 0.2);
+    (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms));
   Alcotest.(check bool) "returned before the server let go" false !let_go
 
 (* A borrower cancelled while its work waits on something other than the
@@ -4489,7 +4579,7 @@ let a_cancelled_borrower_returns_at_the_cancellation () =
             pid := one t "select pg_backend_pid()::text" [];
             script t "begin";
             Eio.Promise.resolve wait ();
-            Eio.Time.Mono.sleep clock 5.;
+            Eio.Time.Mono.sleep_span clock Mtime.Span.(5 * s);
             slept := true)
       with
       | Ok () | Error (`Pool _) -> ())
@@ -4522,7 +4612,7 @@ let a_statement_not_yet_sent_is_never_sent () =
               (Pg.Pipeline.execute t "insert into pgeio_unsent values (1)"
                  ~params:[]);
             Eio.Promise.resolve queue ();
-            Eio.Time.Mono.sleep clock 5.)
+            Eio.Time.Mono.sleep_span clock Mtime.Span.(5 * s))
       with
       | Ok () | Error (`Pool _) -> ())
     (fun () -> Eio.Promise.await queued);
@@ -4687,10 +4777,12 @@ let a_pooled_connection_never_listens () =
 let the_timeout_it_was_made_with () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
-  borrow p (fun t -> Pg.set_timeout t ~timeout_s:None);
+  borrow p (fun t -> Pg.set_timeout t ~timeout:None);
   borrow p (fun t ->
-      Alcotest.(check (option (float 0.)))
-        "put back" (Some 30.) (Pg.timeout_s t));
+      Alcotest.(check (option (testable Mtime.Span.pp Mtime.Span.equal)))
+        "put back"
+        (Some Mtime.Span.(30 * s))
+        (Pg.timeout t));
   Pg.Pool.close p
 
 let backend t = one t "select pg_backend_pid()::text" []
@@ -4700,15 +4792,15 @@ let backend t = one t "select pg_backend_pid()::text" []
 let a_connection_past_its_lifetime () =
   with_eio @@ fun env sw ->
   let clock = Eio.Stdenv.mono_clock env in
-  let p = pool ~max_lifetime_s:0.3 env sw in
+  let p = pool ~max_lifetime:Mtime.Span.(300 * ms) env sw in
   let first = borrow p backend in
   let held =
     borrow p (fun t ->
-        Eio.Time.Mono.sleep clock 0.8;
+        Eio.Time.Mono.sleep_span clock Mtime.Span.(800 * ms);
         backend t)
   in
   Alcotest.(check string) "left alone while borrowed" first held;
-  Eio.Time.Mono.sleep clock 0.6;
+  Eio.Time.Mono.sleep_span clock Mtime.Span.(600 * ms);
   Alcotest.(check bool)
     "made anew once back" true
     (not (String.equal first (borrow p backend)));
@@ -4719,9 +4811,9 @@ let a_connection_past_its_lifetime () =
 let a_dead_idle_connection_is_checked () =
   with_eio @@ fun env sw ->
   let clock = Eio.Stdenv.mono_clock env in
-  let p = pool ~idle_check_s:0.2 ~size:2 env sw in
+  let p = pool ~idle_check:Mtime.Span.(200 * ms) ~size:2 env sw in
   terminate env sw (borrow p backend);
-  Eio.Time.Mono.sleep clock 0.8;
+  Eio.Time.Mono.sleep_span clock Mtime.Span.(800 * ms);
   Alcotest.(check bool)
     "made anew by the check" true
     ((Pg.Pool.stats p).replaced >= 1);
@@ -4733,7 +4825,7 @@ let a_dead_idle_connection_is_checked () =
 let the_pools_figures () =
   with_eio @@ fun env sw ->
   let clock = Eio.Stdenv.mono_clock env in
-  let p = pool ~size:2 ~wait_s:1. env sw in
+  let p = pool ~size:2 ~wait:Mtime.Span.(1 * s) env sw in
   let figures () =
     let s = Pg.Pool.stats p in
     (s.size, s.idle, s.waiting)
@@ -4742,13 +4834,15 @@ let the_pools_figures () =
   let seen = ref (0, 0, 0) in
   Eio.Fiber.all
     [
-      (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.3));
-      (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.3));
       (fun () ->
-        Eio.Time.Mono.sleep clock 0.05;
+        borrow p (fun _ -> Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms)));
+      (fun () ->
+        borrow p (fun _ -> Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms)));
+      (fun () ->
+        Eio.Time.Mono.sleep_span clock Mtime.Span.(50 * ms);
         borrow p (fun _ -> ()));
       (fun () ->
-        Eio.Time.Mono.sleep clock 0.15;
+        Eio.Time.Mono.sleep_span clock Mtime.Span.(150 * ms);
         seen := figures ());
     ];
   Alcotest.(check (triple int int int))
@@ -4767,33 +4861,33 @@ let closing_a_pool_waits_for_its_borrows () =
   Eio.Fiber.both
     (fun () ->
       borrow p (fun t ->
-          Eio.Time.Mono.sleep clock 0.3;
+          Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms);
           during := Pg.closed t;
           ignore (one t "select 1" [])))
     (fun () ->
-      Eio.Time.Mono.sleep clock 0.1;
+      Eio.Time.Mono.sleep_span clock Mtime.Span.(100 * ms);
       Pg.Pool.close p);
   Alcotest.(check bool) "not closed while borrowed" false !during;
   Alcotest.(check bool)
     "and none lent after" true
-    (match Pg.Pool.use ~wait_s:0.1 p ignore with
+    (match Pg.Pool.use ~wait:Mtime.Span.(100 * ms) p ignore with
     | Error (`Pool `Closed) -> true
     | Ok () | Error (`Pool `Busy) -> false)
 
 (* A closed pool lends nothing, and says so at once: to a borrow already
    waiting when it closes, and to one asked for after. Their wait is an
-   hour and the verdict comes within [within] seconds, so a borrow that
+   hour and the verdict comes within [within], so a borrow that
    waits out its wait fails, however fast the machine. *)
 let a_closed_pool_answers_at_once () =
   with_eio @@ fun env sw ->
-  let p = pool ~wait_s:3600. env sw in
+  let p = pool ~wait:Mtime.Span.(3600 * s) env sw in
   let clock = Eio.Stdenv.mono_clock env in
-  let within = 10. in
+  let within = Mtime.Span.(10 * s) in
   let answered () =
     Eio.Fiber.first
       (fun () -> Some (Pg.Pool.use p ignore))
       (fun () ->
-        Eio.Time.Mono.sleep clock within;
+        Eio.Time.Mono.sleep_span clock within;
         None)
   in
   let closed_answer what = function
@@ -4803,7 +4897,7 @@ let a_closed_pool_answers_at_once () =
           (Pg.Pool.error_to_string e)
     | Some (Error (`Pool `Busy)) -> Alcotest.failf "%s: busy, not closed" what
     | Some (Ok ()) -> Alcotest.failf "%s: lent a connection" what
-    | None -> Alcotest.failf "%s: no answer within %gs" what within
+    | None -> Alcotest.failf "%s: no answer within %a" what Mtime.Span.pp within
   in
   let waiting = ref None in
   borrow p (fun _ ->
@@ -4825,7 +4919,7 @@ let a_dropped_connection_comes_back_as_it_was () =
   let pid = borrow p (fun t -> one t "select pg_backend_pid()::text" []) in
   terminate env sw pid;
   (* Let the termination cross Docker's proxy first. *)
-  Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.1;
+  Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(100 * ms);
   borrow p (fun t ->
       Alcotest.(check bool)
         "a new backend, found gone as it was lent, so the first statement runs"
@@ -4859,17 +4953,17 @@ let a_pool_is_borrowed_from_every_domain () =
    must not need the domain that made it. *)
 let elsewhere env f = Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f
 
-let shared_pool ?(timeout_s = 30.) ?(c = plain ()) env sw =
+let shared_pool ?(timeout = Mtime.Span.(30 * s)) ?(c = plain ()) env sw =
   ok_pg
     (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
        ~clock:(Eio.Stdenv.mono_clock env)
-       ~size:1 ~timeout_s c)
+       ~size:1 ~timeout c)
 
 (* A statement past its timeout on another domain fails as [Timeout], and
    the pool, its switch and the connection carry on. *)
 let a_timeout_in_another_domain () =
   with_eio @@ fun env sw ->
-  let p = shared_pool ~timeout_s:0.5 env sw in
+  let p = shared_pool ~timeout:Mtime.Span.(500 * ms) env sw in
   elsewhere env (fun () ->
       borrow p (fun t ->
           match Pg.execute t "select pg_sleep(2)" ~params:[] with
@@ -4890,7 +4984,7 @@ let a_reconnect_in_another_domain () =
   let p = shared_pool env sw in
   let pid = borrow p (fun t -> one t "select pg_backend_pid()::text" []) in
   terminate env sw pid;
-  Eio.Time.Mono.sleep (Eio.Stdenv.mono_clock env) 0.1;
+  Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(100 * ms);
   elsewhere env (fun () ->
       borrow p (fun t ->
           Alcotest.(check bool)
@@ -4944,7 +5038,7 @@ let a_cancelled_reconnect_in_another_domain () =
         (fun () ->
           match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
           | Ok () | Error (`Pool _) -> ())
-        (fun () -> Eio.Time.Mono.sleep clock 0.2));
+        (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms)));
   Atomic.set answering true;
   Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);
   Eio.Promise.resolve release ();
@@ -4964,11 +5058,8 @@ let a_cancelled_borrow_in_another_domain () =
             (Pg.Pool.use p (fun t ->
                  Pg.execute t "select pg_sleep(5)" ~params:[])
               : ((Pg.Tag.t, Pg.error) result, Pg.Pool.error) result))
-        (fun () -> Eio.Time.Mono.sleep clock 0.3));
-  let took = seconds_since clock started in
-  Alcotest.(check bool)
-    (Printf.sprintf "ended at the server, in %.2fs" took)
-    true (took < 2.);
+        (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms)));
+  shorter "ended at the server" (since clock started) ~than:Mtime.Span.(2 * s);
   Alcotest.(check string)
     "and taking statements" "1"
     (borrow p (fun t -> one t "select 1" []));
@@ -4986,7 +5077,7 @@ let a_tls_connection_in_another_domain () =
    another, and closed there it is closed here. *)
 let a_connection_used_in_another_domain () =
   with_eio @@ fun env sw ->
-  let t = connect ~timeout_s:0.5 env sw (plain ()) in
+  let t = connect ~timeout:Mtime.Span.(500 * ms) env sw (plain ()) in
   elsewhere env (fun () ->
       (match Pg.execute t "select pg_sleep(2)" ~params:[] with
       | Error Pg.Timeout -> ()
@@ -5005,7 +5096,9 @@ let the_pool_says_when_it_is_in_trouble () =
         let p = pool env sw in
         let clock = Eio.Stdenv.mono_clock env in
         Eio.Fiber.both
-          (fun () -> borrow p (fun _ -> Eio.Time.Mono.sleep clock 0.3))
+          (fun () ->
+            borrow p (fun _ ->
+                Eio.Time.Mono.sleep_span clock Mtime.Span.(300 * ms)))
           (fun () -> borrow p ignore);
         Pg.Pool.close p)
   in
@@ -5056,7 +5149,9 @@ let a_cancelled_reset_gives_the_connection_back () =
     | Ok c -> c
     | Error e -> Alcotest.fail e
   in
-  let p = ok_pg (Pg.Pool.create ~sw ~net ~clock ~size:1 ~wait_s:1. c) in
+  let p =
+    ok_pg (Pg.Pool.create ~sw ~net ~clock ~size:1 ~wait:Mtime.Span.(1 * s) c)
+  in
   borrow p (fun t ->
       Alcotest.(check bool)
         "dropped at its first statement" true
@@ -5066,7 +5161,7 @@ let a_cancelled_reset_gives_the_connection_back () =
     (fun () ->
       match Pg.Pool.use p (fun _ -> Alcotest.fail "lent unanswered") with
       | Ok () | Error (`Pool _) -> ())
-    (fun () -> Eio.Time.Mono.sleep clock 0.2);
+    (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms));
   answering := true;
   Alcotest.(check bool) "lent again, and open" false (borrow p Pg.closed);
   Eio.Promise.resolve release ();

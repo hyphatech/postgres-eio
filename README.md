@@ -88,7 +88,7 @@ ignored.
 | `sslnegotiation` | `postgres`, or `direct` for TLS from the first byte (needs `require` or stronger) | `postgres` |
 | `channel_binding` | `disable`, `prefer`, `require` | `prefer` |
 | `require_auth` | list of `password`, `md5`, `scram-sha-256`, `none`, or each negated with `!` | all |
-| `connect_timeout` | seconds per address attempt | the connection's `timeout_s` (30) |
+| `connect_timeout` | whole seconds per address attempt | the connection's `timeout` (30 s) |
 | `application_name` | | |
 | `keepalives` | `1`, `0` | `1` |
 | `target_session_attrs` | `any`, `read-write`, `read-only`, `primary`, `standby`, `prefer-standby` | `any` |
@@ -121,7 +121,7 @@ let count pool =
 ```
 
 `Pool.use` returns `` `Pool `Busy `` if no connection frees up within
-`wait_s` (5 s), and `` `Pool `Closed `` at once after `Pool.close`;
+its `wait` (5 s, or `~wait:Mtime.Span.(500 * ms)`), and `` `Pool `Closed `` at once after `Pool.close`;
 `Pool.error_to_string` prints either. Cancelling a borrower stops it at
 once, wherever it waits: its statement is cancelled at the server, so the
 transaction rolls back, and its connection is closed and made again at the

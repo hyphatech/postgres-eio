@@ -43,7 +43,7 @@ type t = {
   ssl_negotiation : ssl_negotiation;
   channel_binding : channel_binding;
   require_auth : auth_methods;
-  connect_timeout_s : float option;
+  connect_timeout : Mtime.Span.t option;
   application_name : string option;
   keepalives : bool;
   target_session_attrs : session_attrs;
@@ -337,6 +337,17 @@ let endpoints ~hosts ~addresses ports =
     (List.combine hosts addresses)
     ports (Ok [])
 
+(* connect_timeout is whole seconds, as libpq reads it. A span is unsigned
+   nanoseconds, so more seconds than it holds are the longest span, and a
+   span is written rounded up, so it never bounds an attempt shorter. *)
+let ns_per_s = 1_000_000_000L
+let longest_seconds = Int64.to_int (Int64.unsigned_div Int64.minus_one ns_per_s)
+
+let whole_seconds span =
+  let ns = Mtime.Span.to_uint64_ns span in
+  let up = if Int64.equal (Int64.unsigned_rem ns ns_per_s) 0L then 0L else 1L in
+  Printf.sprintf "%Lu" (Int64.add (Int64.unsigned_div ns ns_per_s) up)
+
 (* Later pairs win. An empty value unsets the key, as in libpq. *)
 let of_pairs pairs =
   let* () =
@@ -404,17 +415,18 @@ let of_pairs pairs =
     | None -> Ok every_method
     | Some s -> require_auth s
   in
-  let* connect_timeout_s =
+  let* connect_timeout =
     match find "connect_timeout" with
     | None -> Ok None
-    | Some s -> (
-        match Text.to_int s with
-        | Some n when n > 0 -> Ok (Some (float_of_int n))
+    | Some written -> (
+        match Text.to_int written with
+        | Some n when n > longest_seconds -> Ok (Some Mtime.Span.max_span)
+        | Some n when n > 0 -> Ok (Some Mtime.Span.(n * s))
         | Some _ -> Ok None
         | None ->
             Error
-              (Printf.sprintf "connect_timeout %S is not a number of seconds" s)
-        )
+              (Printf.sprintf "connect_timeout %S is not a number of seconds"
+                 written))
   in
   let* keepalives =
     chosen "keepalives" [ ("1", true); ("0", false) ] ~default:true
@@ -455,7 +467,7 @@ let of_pairs pairs =
       ssl_negotiation;
       channel_binding;
       require_auth;
-      connect_timeout_s;
+      connect_timeout;
       application_name = find "application_name";
       keepalives;
       target_session_attrs;
@@ -886,10 +898,7 @@ let to_url t =
             && t.require_auth.scram_sha_256 && t.require_auth.none
           then None
           else Some (require_auth_to_string t.require_auth) );
-        ( "connect_timeout",
-          Option.map
-            (fun s -> string_of_int (int_of_float (Float.ceil s)))
-            t.connect_timeout_s );
+        ("connect_timeout", Option.map whole_seconds t.connect_timeout);
         ("application_name", t.application_name);
         ("keepalives", if t.keepalives then None else Some "0");
         ( "target_session_attrs",

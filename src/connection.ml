@@ -91,7 +91,7 @@ type t = {
   tls : Tls.Config.client option;
   parameters : (string * string) list;
   statement_cache : int;
-  mutable timeout_s : float option;
+  mutable timeout : Mtime.Span.t option;
   mutable link : link option;
   mutable status : P.transaction_status;
   mutable pid : int;
@@ -107,10 +107,10 @@ type t = {
 
 (* A timeout for work outside a link's own timer: connecting, cancel
    requests, the Terminate. *)
-let bounded ~clock timeout_s f =
+let bounded ~clock timeout f =
   let timeout =
-    match timeout_s with
-    | Some s -> Eio.Time.Timeout.seconds clock s
+    match timeout with
+    | Some span -> Eio.Time.Timeout.v clock span
     | None -> Eio.Time.Timeout.none
   in
   match Eio.Time.Timeout.run_exn timeout f with
@@ -127,6 +127,12 @@ let guard f =
 
 let encode m = match P.encode m with Ok s -> s | Error e -> fail (Refused e)
 let now t = Eio.Time.Mono.now t.clock
+
+(* The wait until [deadline]: Mtime.span is the distance either way, and a
+   deadline already passed is no wait at all. *)
+let until ~now deadline =
+  if Mtime.is_later deadline ~than:now then Mtime.span now deadline
+  else Mtime.Span.zero
 
 (* Counted as waiting on the server; each byte moved is progress. *)
 let waited t link f =
@@ -249,14 +255,9 @@ let out_of_turn section m when_ =
    byte moved, and fails the exchange if none has. Time is only counted
    while waiting on the server, never during the caller's row function. *)
 let exchange t link f =
-  match t.timeout_s with
+  match t.timeout with
   | None -> f ()
-  | Some s ->
-      let span =
-        Option.value
-          (Mtime.Span.of_float_ns (s *. 1e9))
-          ~default:Mtime.Span.zero
-      in
+  | Some span ->
       let rec timer () =
         let from = if link.waiting > 0 then link.moved else now t in
         Eio.Time.Mono.sleep_until t.clock
@@ -841,9 +842,9 @@ let session_attrs_name = function
 let establish t =
   let c = t.conninfo in
   let bound =
-    match c.connect_timeout_s with
-    | Some s when s > 0. -> Some s
-    | Some _ | None -> t.timeout_s
+    match c.connect_timeout with
+    | Some span when not (Mtime.Span.equal span Mtime.Span.zero) -> Some span
+    | Some _ | None -> t.timeout
   in
   let terminate link =
     (try guard (fun () -> Eio.Flow.copy_string (encode P.Terminate) link.flow)
@@ -907,8 +908,8 @@ let establish t =
   | Error last ->
       fail (Option.value last ~default:(Io "no address to connect to"))
 
-let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
-    ~heard conninfo =
+let open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache ~heard
+    conninfo =
   (* TLS and the SCRAM nonce fail at runtime without a seeded RNG. One the
      application set is its choice, and stays. *)
   (match Mirage_crypto_rng.default_generator () with
@@ -932,7 +933,7 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
           tls;
           parameters;
           statement_cache = Int.max 0 statement_cache;
-          timeout_s = Some timeout_s;
+          timeout = Some timeout;
           link = None;
           status = P.Idle;
           pid = 0;
@@ -949,9 +950,9 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
           Ok t
       | exception Fail e -> Error e)
 
-let connect ~sw ~net ~clock ?(parameters = []) ?(timeout_s = 30.)
+let connect ~sw ~net ~clock ?(parameters = []) ?(timeout = Mtime.Span.(30 * s))
     ?(statement_cache = 256) conninfo =
-  open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache
+  open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache
     ~heard:None conninfo
 
 (* Cancelling *)
@@ -998,7 +999,7 @@ let send_cancel t ~within =
       | () -> Ok ()
       | exception Fail e -> Error e)
 
-let cancel t = send_cancel t ~within:t.timeout_s
+let cancel t = send_cancel t ~within:t.timeout
 
 (* The answer queue *)
 
@@ -1020,16 +1021,16 @@ let break t e =
    message on a server that answers within milliseconds; 5 s is far past
    that, and short enough that a caller already given up on waits little
    more. *)
-let cancel_request_s = 5.
+let cancel_request = Mtime.Span.(5 * s)
 
 (* A cancel the driver sends for a caller already given up on, which may
    be shielded, has a bound of its own: the connection's timeout may be
    lifted, and that caller is not made to wait as long again. *)
 let cancel_given_up t =
   let within =
-    match t.timeout_s with
-    | Some s -> Float.min s cancel_request_s
-    | None -> cancel_request_s
+    match t.timeout with
+    | Some span when Mtime.Span.is_shorter span ~than:cancel_request -> span
+    | Some _ | None -> cancel_request
   in
   send_cancel t ~within:(Some within)
 
@@ -1985,8 +1986,8 @@ let status t = t.status
 let parameter t name = List.assoc_opt name t.settings
 let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache
-let timeout_s t = t.timeout_s
-let set_timeout t ~timeout_s = t.timeout_s <- timeout_s
+let timeout t = t.timeout
+let set_timeout t ~timeout = t.timeout <- timeout
 
 (* The Terminate is bounded: a server that stopped reading never takes it. *)
 let close t =
@@ -1994,7 +1995,7 @@ let close t =
   | None -> ()
   | Some link ->
       (try
-         bounded ~clock:t.clock t.timeout_s (fun () ->
+         bounded ~clock:t.clock t.timeout (fun () ->
              guard (fun () ->
                  Eio.Flow.copy_string (encode P.Terminate) link.flow))
        with Fail _ -> ());
@@ -2028,7 +2029,7 @@ let notify t ~channel payload =
       (execute t "select pg_notify($1, $2)"
          ~params:[ Some channel; Some payload ])
 
-(* Waits on socket readiness, bounded by [seconds], never on a cancellable
+(* Waits on socket readiness, bounded by [within], never on a cancellable
    read: tls-eio stores a cancelled read's exception as the session error
    and raises it on the next write, so a TLS listener would fail at its
    first silence. Once bytes arrive, the read runs under the normal
@@ -2041,9 +2042,9 @@ let notify t ~channel payload =
    cancellation there keeps the connection, and the usual loop races this
    wait against a tick. The read after readiness is shielded, so it is
    never cut off midway. *)
-let heard_within t ~seconds =
+let heard_within t ~within:bound =
   let within f =
-    match Eio.Time.Timeout.run (Eio.Time.Timeout.seconds t.clock seconds) f with
+    match Eio.Time.Timeout.run (Eio.Time.Timeout.v t.clock bound) f with
     | Ok n -> Some n
     | Error `Timeout -> None
   in
@@ -2103,7 +2104,7 @@ module Listener = struct
   type t = {
     conn : conn;
     heard : notification Queue.t;
-    heartbeat_s : float;
+    heartbeat : Mtime.Span.t;
     (* When the listener last heard the server, or last proved it alive: the
        heartbeat counts from it across calls, since a loop racing [next]
        against a shorter tick would otherwise never send one. *)
@@ -2115,20 +2116,21 @@ module Listener = struct
 
   let ( let* ) = Result.bind
 
-  let connect ~sw ~net ~clock ?(parameters = []) ?(timeout_s = 30.)
-      ?(heartbeat_s = 10.) conninfo =
+  let connect ~sw ~net ~clock ?(parameters = [])
+      ?(timeout = Mtime.Span.(30 * s)) ?(heartbeat = Mtime.Span.(10 * s))
+      conninfo =
     let heard = Queue.create () in
     Result.map
       (fun conn ->
         {
           conn;
           heard;
-          heartbeat_s;
+          heartbeat;
           heard_at = now conn;
           channels = [];
           stopped = false;
         })
-      (open_connection ~sw ~net ~clock ~parameters ~timeout_s ~statement_cache:0
+      (open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache:0
          ~heard:(Some heard) conninfo)
 
   (* Quoted, so the name is case-sensitive. *)
@@ -2154,8 +2156,8 @@ module Listener = struct
      up to half a minute, so a long outage is not hammered. So does an error
      of class 57P, which a restart answers with (57P01 shutting down, 57P03
      starting up). Any other server refusal is returned. *)
-  let first_retry_s = 1.
-  let last_retry_s = 30.
+  let first_retry = Mtime.Span.s
+  let last_retry = Mtime.Span.(30 * s)
 
   let transient = function
     | Timeout | Closed | Io _ | Protocol _ -> true
@@ -2172,20 +2174,23 @@ module Listener = struct
           script t.conn sql)
         (Ok ()) t.channels
     in
-    let rec attempt wait_s =
+    let rec attempt wait =
       match again () with
       | Ok () ->
           t.heard_at <- now t.conn;
           Ok Reconnected
       | Error e when transient e ->
           Log.warn (fun m ->
-              m "a listener could not reconnect, and tries again in %gs: %s"
-                wait_s (error_to_string e));
-          Eio.Time.Mono.sleep t.conn.clock wait_s;
-          attempt (Float.min last_retry_s (wait_s *. 2.))
+              m "a listener could not reconnect, and tries again in %a: %s"
+                Mtime.Span.pp wait (error_to_string e));
+          Eio.Time.Mono.sleep_span t.conn.clock wait;
+          let doubled = Mtime.Span.(2 * wait) in
+          attempt
+            (if Mtime.Span.is_longer doubled ~than:last_retry then last_retry
+             else doubled)
       | Error e -> Error e
     in
-    attempt first_retry_s
+    attempt first_retry
 
   let lost t e =
     Log.warn (fun m ->
@@ -2204,11 +2209,12 @@ module Listener = struct
       | Some n -> Ok (Notification n)
       | None when closed t.conn -> reconnect t
       | None -> (
-          let silent_s =
-            Mtime.Span.to_float_ns (Mtime.span t.heard_at (now t.conn)) /. 1e9
+          let due =
+            Option.value
+              (Mtime.add_span t.heard_at t.heartbeat)
+              ~default:Mtime.max_stamp
           in
-          let seconds = Float.max 0. (t.heartbeat_s -. silent_s) in
-          match heard_within t.conn ~seconds with
+          match heard_within t.conn ~within:(until ~now:(now t.conn) due) with
           | Ok true ->
               t.heard_at <- now t.conn;
               (* A caller cancelled during the shielded read leaves what

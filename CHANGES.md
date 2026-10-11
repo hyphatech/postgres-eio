@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Breaking: every duration is an `Mtime.Span.t` named for what it bounds,
+  not a float of seconds named for its unit, so a wait in the wrong unit
+  no longer compiles. `connect`'s and `Listener.connect`'s `?timeout_s`
+  is `?timeout`, `Listener.connect`'s `?heartbeat_s` is `?heartbeat`,
+  `Pool.create`'s `?timeout_s`, `?wait_s`, `?max_lifetime_s` and
+  `?idle_check_s` are `?timeout`, `?wait`, `?max_lifetime` and
+  `?idle_check`, and `Pool.use`'s `?wait_s` is `?wait`: write
+  `~timeout:Mtime.Span.(10 * s)`.
+- Breaking: `timeout_s` is `timeout`, and `set_timeout` takes
+  `~timeout:Mtime.Span.t option`.
+- Breaking: the `Conninfo.t` field `connect_timeout_s : float option` is
+  `connect_timeout : Mtime.Span.t option`. The connection string still
+  gives it in whole seconds, as libpq reads it, and `to_url` writes it
+  in whole seconds, rounded up. Only a zero span now falls back to the
+  connection's timeout, since a span is never negative.
+
 - Breaking: `abandon` and `resume` are gone. The pool has stopped a
   cancelled borrower through Eio cancellation since 0.2.0, and nothing
   else called them. To stop a statement, cancel the fiber running it: the

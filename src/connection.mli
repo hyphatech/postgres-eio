@@ -47,7 +47,7 @@ val connect :
   net:_ Eio.Net.t ->
   clock:_ Eio.Time.Mono.t ->
   ?parameters:(string * string) list ->
-  ?timeout_s:float ->
+  ?timeout:Mtime.Span.t ->
   ?statement_cache:int ->
   Conninfo.t ->
   (t, error) result
@@ -57,11 +57,11 @@ val connect :
     [parameters] are startup parameters, e.g. [("statement_timeout", "10s")],
     re-sent on every {!reset}, so they last for the connection's life.
 
-    [timeout_s] (30) is the longest the connection waits on the server for bytes
+    [timeout] (30 s) is the longest the connection waits on the server for bytes
     to move, in either direction; the caller's row function is not timed.
-    Connecting uses [connect_timeout] if positive, else [timeout_s]. Bound
+    Connecting uses [connect_timeout] if not zero, else [timeout]. Bound
     statement runtime with [statement_timeout]; for statements that wait longer
-    than [timeout_s], raise it with {!set_timeout}.
+    than [timeout], raise it with {!set_timeout}.
 
     [statement_cache] (256) is how many statements stay parsed, LRU by SQL text,
     emptied by {!reset}. [0] disables it, for poolers without named statements
@@ -243,11 +243,11 @@ val closed : t -> bool
 val statement_cache : t -> int
 (** The cache size it was made with; [0] means no [binary] results. *)
 
-val timeout_s : t -> float option
-(** The current timeout, in seconds; [None] waits forever. *)
+val timeout : t -> Mtime.Span.t option
+(** The current timeout; [None] waits forever. *)
 
-val set_timeout : t -> timeout_s:float option -> unit
-(** For long work like a migration: [set_timeout conn ~timeout_s:None]. A pool
+val set_timeout : t -> timeout:Mtime.Span.t option -> unit
+(** For long work like a migration: [set_timeout conn ~timeout:None]. A pool
     restores the original timeout on return. *)
 
 val close : t -> unit
@@ -283,11 +283,11 @@ module Listener : sig
     net:_ Eio.Net.t ->
     clock:_ Eio.Time.Mono.t ->
     ?parameters:(string * string) list ->
-    ?timeout_s:float ->
-    ?heartbeat_s:float ->
+    ?timeout:Mtime.Span.t ->
+    ?heartbeat:Mtime.Span.t ->
     Conninfo.t ->
     (t, error) result
-  (** Connects as {!Postgres_eio.connect}. [heartbeat_s] (10) is how long the
+  (** Connects as {!Postgres_eio.connect}. [heartbeat] (10 s) is how long the
       listener goes without hearing from the server before pinging it, counted
       across calls to {!next}. *)
 

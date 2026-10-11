@@ -85,9 +85,10 @@ type t = {
   ssl_negotiation : ssl_negotiation;
   channel_binding : channel_binding;
   require_auth : auth_methods;
-  connect_timeout_s : float option;
-      (** per address attempt; when absent or not positive, the connection's
-          [timeout_s] bounds each attempt instead *)
+  connect_timeout : Mtime.Span.t option;
+      (** per address attempt, from [connect_timeout] in whole seconds as libpq
+          reads it, where [0] or less is absent; when absent or zero, the
+          connection's [timeout] bounds each attempt instead *)
   application_name : string option;
   keepalives : bool;  (** TCP keepalive, unless [keepalives=0] *)
   target_session_attrs : session_attrs;
@@ -117,7 +118,9 @@ val passfile : string -> t -> t
     one others can read) is the caller's job. *)
 
 val to_url : t -> string
-(** A URL that parses back to [t], minus {!passfile} passwords. *)
+(** A URL that parses back to [t], minus {!passfile} passwords.
+    [connect_timeout] is written in whole seconds, rounded up, so a span between
+    them parses back one second longer at most. *)
 
 val ssl_mode_to_string : ssl_mode -> string
 (** E.g. [verify-full]. *)

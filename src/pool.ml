@@ -32,10 +32,10 @@ type t = {
   closed : unit Eio.Promise.t;
   close_now : unit Eio.Promise.u;
   size : int;
-  wait_s : float;
+  wait : Mtime.Span.t;
   clock : Eio.Time.Mono.ty Eio.Resource.t;
   connect : unit -> (C.t, C.error) result;
-  timeout_s : float option;
+  timeout : Mtime.Span.t option;
   reset : bool;
   lifetime : Mtime.Span.t;
   idle_check : Mtime.Span.t;
@@ -48,16 +48,17 @@ type t = {
 
 type stats = { size : int; idle : int; waiting : int; replaced : int }
 
-let span s =
-  Option.value (Mtime.Span.of_float_ns (s *. 1e9)) ~default:Mtime.Span.max_span
-
 let now t = Eio.Time.Mono.now t.clock
 
 (* Jitter of ±10%, so connections made together are not replaced together. *)
 let entry t conn =
   let made = now t in
   let jitter = 0.9 +. Random.State.float t.random 0.2 in
-  let lifetime = span (Mtime.Span.to_float_ns t.lifetime *. jitter /. 1e9) in
+  let lifetime =
+    Option.value
+      (Mtime.Span.of_float_ns (Mtime.Span.to_float_ns t.lifetime *. jitter))
+      ~default:Mtime.Span.max_span
+  in
   {
     conn;
     expires =
@@ -151,7 +152,7 @@ let ready e =
    exception is returned for the borrower to raise. *)
 let give_back t e ~cancelled =
   if cancelled && not (C.closed e.conn) then begin
-    C.set_timeout e.conn ~timeout_s:t.timeout_s;
+    C.set_timeout e.conn ~timeout:t.timeout;
     ignore (C.cancel e.conn : (unit, C.error) result);
     C.close e.conn
   end;
@@ -160,7 +161,7 @@ let give_back t e ~cancelled =
     | (_ : (unit, C.error) result) -> None
     | exception ex -> Some (ex, Printexc.get_raw_backtrace ())
   in
-  C.set_timeout e.conn ~timeout_s:t.timeout_s;
+  C.set_timeout e.conn ~timeout:t.timeout;
   if not (C.closed e.conn) then queue_reset t e;
   back t e;
   raised
@@ -233,13 +234,13 @@ let tidy t =
   done;
   List.iter (renew t) !due
 
-(* Passes per [min idle_check_s max_lifetime_s], so a connection is
-   replaced or checked at most a quarter of that period late. *)
-let passes_per_period = 4.
+(* Passes per [min idle_check max_lifetime], so a connection is replaced
+   or checked at most a quarter of that period late. *)
+let passes_per_period = 4L
 
 let housekeeping t ~every =
   let rec loop () =
-    Eio.Time.Mono.sleep t.clock every;
+    Eio.Time.Mono.sleep_span t.clock every;
     if not (Eio.Promise.is_resolved t.closed) then begin
       tidy t;
       loop ()
@@ -247,11 +248,12 @@ let housekeeping t ~every =
   in
   loop ()
 
-let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
-    ?(wait_s = 5.) ?(reset = true) ?(max_lifetime_s = 1800.)
-    ?(idle_check_s = 60.) conninfo =
+let create ~sw ~net ~clock ?parameters ?timeout ?statement_cache ?(size = 8)
+    ?(wait = Mtime.Span.(5 * s)) ?(reset = true)
+    ?(max_lifetime = Mtime.Span.(30 * min)) ?(idle_check = Mtime.Span.(60 * s))
+    conninfo =
   let connect () =
-    C.connect ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache conninfo
+    C.connect ~sw ~net ~clock ?parameters ?timeout ?statement_cache conninfo
   in
   let rec go n acc =
     if n <= 0 then Ok acc
@@ -272,23 +274,32 @@ let create ~sw ~net ~clock ?parameters ?timeout_s ?statement_cache ?(size = 8)
           closed;
           close_now;
           size;
-          wait_s;
+          wait;
           clock :> Eio.Time.Mono.ty Eio.Resource.t;
           connect;
-          timeout_s = (match all with c :: _ -> C.timeout_s c | [] -> None);
+          timeout = (match all with c :: _ -> C.timeout c | [] -> None);
           reset;
-          lifetime = span max_lifetime_s;
-          idle_check = span idle_check_s;
+          lifetime = max_lifetime;
+          idle_check;
           waiting = Atomic.make 0;
           replaced = Atomic.make 0;
           random = Random.State.make_self_init ();
         }
       in
       List.iter (fun c -> Eio.Stream.add t.free (entry t c)) all;
+      let period =
+        if Mtime.Span.is_shorter max_lifetime ~than:idle_check then max_lifetime
+        else idle_check
+      in
+      let every =
+        Mtime.Span.of_uint64_ns
+          (Int64.unsigned_div
+             (Mtime.Span.to_uint64_ns period)
+             passes_per_period)
+      in
       (* A daemon, so it does not keep the switch open. *)
       Eio.Fiber.fork_daemon ~sw (fun () ->
-          housekeeping t
-            ~every:(Float.min max_lifetime_s idle_check_s /. passes_per_period);
+          housekeeping t ~every;
           `Stop_daemon);
       t)
     (go (max 1 size) [])
@@ -301,17 +312,18 @@ let stats (t : t) =
     replaced = Atomic.get t.replaced;
   }
 
-let wait_warn_s = 0.1
-let hold_warn_s = 0.25
+let wait_warn = Mtime.Span.(100 * ms)
+let hold_warn = Mtime.Span.(250 * ms)
 
-let slow ~what ~over_s since until =
-  let s = Mtime.Span.to_float_ns (Mtime.span since until) /. 1e9 in
-  if s > over_s then Log.warn (fun m -> m "%s took %.0f ms" what (s *. 1000.))
+let slow ~what ~over since until =
+  let took = Mtime.span since until in
+  if Mtime.Span.is_longer took ~than:over then
+    Log.warn (fun m -> m "%s took %a" what Mtime.Span.pp took)
 
 (* Several branches can succeed at once, and the losers' results are
    dropped; if one were a connection it would leak from the pool. So the
    connection always wins. *)
-let take (t : t) ~wait_s =
+let take (t : t) ~wait =
   Atomic.incr t.waiting;
   Fun.protect
     ~finally:(fun () -> Atomic.decr t.waiting)
@@ -324,21 +336,22 @@ let take (t : t) ~wait_s =
             Eio.Promise.await t.closed;
             Error `Closed);
           (fun () ->
-            Eio.Time.Mono.sleep t.clock wait_s;
+            Eio.Time.Mono.sleep_span t.clock wait;
             Error `Busy);
         ])
 
-let use ?wait_s t f =
-  let wait_s = Option.value wait_s ~default:t.wait_s in
+let use ?wait t f =
+  let wait = Option.value wait ~default:t.wait in
   let asked = now t in
-  match take t ~wait_s with
+  match take t ~wait with
   | Error `Busy ->
-      Log.warn (fun m -> m "no connection came free within %gs" wait_s);
+      Log.warn (fun m ->
+          m "no connection came free within %a" Mtime.Span.pp wait);
       Error (`Pool `Busy)
   | Error `Closed -> Error (`Pool `Closed)
   | Ok e ->
       let given = now t in
-      slow ~what:"a wait for a connection" ~over_s:wait_warn_s asked given;
+      slow ~what:"a wait for a connection" ~over:wait_warn asked given;
       (* [f] is not shielded: a cancellation stops it at whatever it is
          waiting on. Only the give-back's own exchanges are. *)
       let answer, cancelled =
@@ -354,7 +367,7 @@ let use ?wait_s t f =
       in
       let raised =
         Eio.Cancel.protect (fun () ->
-            slow ~what:"a borrowed connection" ~over_s:hold_warn_s given (now t);
+            slow ~what:"a borrowed connection" ~over:hold_warn given (now t);
             give_back t e ~cancelled)
       in
       (* What the borrower raised, a cancellation included, came first and

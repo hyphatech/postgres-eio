@@ -25,6 +25,21 @@ let banned =
     ("exit", "a library never exits");
   ]
   @ List.map
+      (fun name ->
+        ( name,
+          "a time is a Ptime.t or an Mtime.Span.t: Ptime.of_float_s \
+           (Eio.Time.now clock), Eio.Time.Timeout.v, Eio.Time.Mono.sleep_span"
+        ))
+      [
+        "Unix.gettimeofday";
+        "Unix.time";
+        "Eio.Time.sleep";
+        "Eio.Time.with_timeout";
+        "Eio.Time.with_timeout_exn";
+        "Eio.Time.Timeout.seconds";
+        "Eio.Time.Mono.sleep";
+      ]
+  @ List.map
       (fun name -> (name, "a library never prints: log through Logs"))
       [
         "print_string";
@@ -202,8 +217,9 @@ let no_banned_identifier () =
   in
   Alcotest.(check (list string)) "banned identifiers" [] found
 
-(* What OCAML.md's "Tests are Alcotest" says every library refuses, word for
-   word: each is refused, bare and behind [Stdlib.]. *)
+(* What OCAML.md's "Tests are Alcotest" and its four shapes of a time say
+   every library refuses, word for word: each is refused, bare and behind
+   [Stdlib.]. A float labelled with a unit is [no_float_with_a_unit]'s. *)
 let shared_refusals =
   [
     "failwith";
@@ -245,6 +261,11 @@ let shared_refusals =
     "Format.print_string";
     "Format.std_formatter";
     "Format.err_formatter";
+    "Unix.gettimeofday";
+    "Unix.time";
+    "Eio.Time.sleep";
+    "Eio.Time.with_timeout";
+    "Eio.Time.Timeout.seconds";
   ]
 
 let every_shared_refusal () =
@@ -259,6 +280,90 @@ let every_shared_refusal () =
         List.is_empty (banned_in "row.ml" ("let _ = " ^ name)))
   in
   Alcotest.(check (list string)) "names let through" [] missed
+
+(* A [float] labelled with a unit, [timeout_s : float] or [?wait_ms:float]:
+   a duration is an Mtime.Span.t named for what it bounds. Read off the
+   code, so a comment or a string may say it. *)
+let unit_suffixes = [ "_s"; "_ms"; "_us"; "_ns" ]
+
+let floats_with_a_unit file source =
+  let code = code_of source in
+  let n = String.length code in
+  let is_space c = Char.equal c ' ' || Char.equal c '\n' in
+  let word_at i w =
+    i + String.length w <= n
+    && String.equal (String.sub code i (String.length w)) w
+    && (i = 0 || not (is_ident_char code.[i - 1]))
+    && (i + String.length w = n
+       || not (is_ident_char code.[i + String.length w]))
+  in
+  let rec back_over_space i =
+    if i >= 0 && is_space code.[i] then back_over_space (i - 1) else i
+  in
+  let label_before i =
+    let colon = back_over_space (i - 1) in
+    if colon >= 0 && Char.equal code.[colon] ':' then (
+      let last = back_over_space (colon - 1) in
+      let first = ref last in
+      while !first >= 0 && is_ident_char code.[!first] do
+        decr first
+      done;
+      if last > !first then Some (String.sub code (!first + 1) (last - !first))
+      else None)
+    else None
+  in
+  let line_of i =
+    let l = ref 1 in
+    for x = 0 to i - 1 do
+      if Char.equal code.[x] '\n' then incr l
+    done;
+    !l
+  in
+  let rec go i acc =
+    if i >= n then List.rev acc
+    else if word_at i "float" then
+      match label_before i with
+      | Some label
+        when List.exists
+               (fun suffix -> String.ends_with ~suffix label)
+               unit_suffixes ->
+          go (i + 5)
+            (Printf.sprintf
+               "src/%s:%d: %s : float -- a duration is an Mtime.Span.t named \
+                for what it bounds"
+               file (line_of i) label
+            :: acc)
+      | Some _ | None -> go (i + 5) acc
+    else go (i + 1) acc
+  in
+  go 0 []
+
+let no_float_with_a_unit () =
+  let found =
+    List.concat_map
+      (fun file -> floats_with_a_unit file (read (Filename.concat src file)))
+      (sources ".ml" @ sources ".mli")
+  in
+  Alcotest.(check (list string)) "floats labelled with a unit" [] found
+
+let a_float_with_a_unit_is_found () =
+  let found source = List.length (floats_with_a_unit "row.ml" source) in
+  List.iter
+    (fun source -> Alcotest.(check int) source 1 (found source))
+    [
+      "val connect : ?timeout_s:float -> unit";
+      "type t = { wait_ms : float option }";
+      "let f (heartbeat_s : float) = heartbeat_s";
+      "val v : timeout_s:\n  float -> t";
+    ];
+  List.iter
+    (fun source -> Alcotest.(check int) source 0 (found source))
+    [
+      "val connect : ?timeout:Mtime.Span.t -> unit";
+      "val ratio : float";
+      "(* timeout_s : float *)";
+      "let x_s : int = 1";
+    ]
 
 let no_silenced_warning () =
   let found =
@@ -298,6 +403,10 @@ let () =
         [
           Alcotest.test_case "no banned identifier" `Quick no_banned_identifier;
           Alcotest.test_case "every shared refusal" `Quick every_shared_refusal;
+          Alcotest.test_case "no float labelled with a unit" `Quick
+            no_float_with_a_unit;
+          Alcotest.test_case "a float labelled with a unit is found" `Quick
+            a_float_with_a_unit_is_found;
           Alcotest.test_case "no silenced warning" `Quick no_silenced_warning;
           Alcotest.test_case "every module has an interface" `Quick
             every_module_has_an_interface;
