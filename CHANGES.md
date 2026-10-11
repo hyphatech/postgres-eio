@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.3.0 (2026-10-11)
 
 - Breaking: every duration is an `Mtime.Span.t` named for what it bounds,
   not a float of seconds named for its unit, so a wait in the wrong unit
