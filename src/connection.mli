@@ -17,7 +17,13 @@
     even when the timeout is lifted. *)
 
 type t
+(** A connection.
 
+    @canonical Postgres_eio.t *)
+
+(** Why an exchange failed.
+
+    @canonical Postgres_eio.error *)
 type error =
   | Server of Server_error.t  (** the server refused, and said why *)
   | Refused of string

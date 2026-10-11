@@ -52,8 +52,8 @@ type frontend =
   | Copy_fail of string  (** ends a COPY FROM STDIN as failed, saying why *)
 
 val encode : frontend -> (string, string) result
-(** Errors on a NUL inside a String, too many Bind parameters, or a message too
-    long for its length field. *)
+(** Errors on a NUL inside a String, a startup parameter with no name, too many
+    Bind parameters, or a message too long for its length field. *)
 
 (** {1 Backend} *)
 

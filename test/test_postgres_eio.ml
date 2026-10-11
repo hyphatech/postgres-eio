@@ -440,6 +440,16 @@ let encodings =
     encodes "54.7 CopyFail" (P.Copy_fail "no") (msg 'f' (cstr "no"));
   ]
 
+(* An empty name is the zero byte that ends the StartupMessage's list, so
+   the parameters after it would be lost. *)
+let a_startup_parameter_has_a_name () =
+  match
+    P.encode
+      (P.Startup { minor = 0; parameters = [ ("", "x"); ("user", "app") ] })
+  with
+  | Error e -> Alcotest.(check bool) e true (contains e "no name")
+  | Ok _ -> Alcotest.fail "a startup parameter with no name was sent"
+
 let a_nul_cannot_be_sent () =
   List.iter
     (fun (what, m) ->
@@ -5227,6 +5237,8 @@ let () =
         @ [
             Alcotest.test_case "54.7 a String cannot carry a NUL" `Quick
               a_nul_cannot_be_sent;
+            Alcotest.test_case "54.7 a startup parameter has a name" `Quick
+              a_startup_parameter_has_a_name;
             Alcotest.test_case "54.7 a Bind counts at most 65535 parameters"
               `Quick too_many_parameters;
           ] );

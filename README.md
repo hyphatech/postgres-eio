@@ -15,7 +15,9 @@ A native Postgres driver for OCaml 5 and Eio.
 - COPY in and out, streamed. LISTEN/NOTIFY with automatic reconnection.
 - Text and binary results.
 - A connection pool that lends every connection in a clean state.
-- Every failure is a value, and no log line or error contains a secret.
+- Every failure is a value. Driver errors and logs never contain
+  parameters, passwords, sign-in exchanges or message bytes; a server's
+  error is in its own words, which can quote a value that failed its cast.
 
 Tested with Postgres 18.
 
