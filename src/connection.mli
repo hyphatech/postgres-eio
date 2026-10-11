@@ -53,9 +53,9 @@ val connect :
 
     [timeout_s] (30) is the longest the connection waits on the server for bytes
     to move, in either direction; the caller's row function is not timed.
-    Connecting uses [connect_timeout] if set, else [timeout_s]. Bound statement
-    runtime with [statement_timeout]; for statements that wait longer than
-    [timeout_s], raise it with {!set_timeout}.
+    Connecting uses [connect_timeout] if positive, else [timeout_s]. Bound
+    statement runtime with [statement_timeout]; for statements that wait longer
+    than [timeout_s], raise it with {!set_timeout}.
 
     [statement_cache] (256) is how many statements stay parsed, LRU by SQL text,
     emptied by {!reset}. [0] disables it, for poolers without named statements

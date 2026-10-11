@@ -70,6 +70,10 @@
 - Breaking: `Conninfo.protocol_minor` is no longer exported. It was a
   step of the start-up, the minor version a StartupMessage carries, and
   nothing outside the driver used it.
+- A `connect_timeout_s` of zero or less falls back to the connection's
+  `timeout_s`, as `Conninfo` documents. A `Conninfo.t` built by hand with
+  `Some 0.` timed out every attempt at once; a parsed connection string
+  never carried one.
 
 ## 0.1.0 (2026-10-06)
 

@@ -1721,6 +1721,40 @@ let a_silent_server_times_out () =
     (Printf.sprintf "within the bound, in %.2fs" took)
     true (took < 2.)
 
+(* The fake never answers, so how long connecting takes is the bound that
+   applied to the attempt. *)
+let timed_out_after env sw ?timeout_s connect_timeout_s =
+  let port, _, _ = a_fake_server env sw ~answer:None in
+  let clock = Eio.Stdenv.mono_clock env in
+  let started = Eio.Time.Mono.now clock in
+  (match
+     connect_with ?timeout_s env sw
+       { (at ~port (Tcp "127.0.0.1") (plain ())) with connect_timeout_s }
+   with
+  | Error Pg.Timeout -> ()
+  | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
+  | Ok _ -> Alcotest.fail "connected to nothing");
+  seconds_since clock started
+
+let connect_timeout_bounds_an_attempt () =
+  with_eio @@ fun env sw ->
+  let took = timed_out_after env sw ~timeout_s:30. (Some 0.3) in
+  Alcotest.(check bool)
+    (Printf.sprintf "within connect_timeout, in %.2fs" took)
+    true (took < 2.)
+
+let a_connect_timeout_not_positive_is_the_timeout () =
+  with_eio @@ fun env sw ->
+  List.iter
+    (fun s ->
+      let took = timed_out_after env sw ~timeout_s:0.5 (Some s) in
+      Alcotest.(check bool)
+        (Printf.sprintf "connect_timeout %g waited for timeout_s, in %.2fs" s
+           took)
+        true
+        (took >= 0.4 && took < 2.))
+    [ 0.; -1. ]
+
 let a_read_past_the_timeout () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
@@ -4246,6 +4280,10 @@ let connection_cases =
       a_reset_keeps_its_parameters;
     Alcotest.test_case "a silent server times out" `Quick
       a_silent_server_times_out;
+    Alcotest.test_case "connect_timeout bounds an attempt" `Quick
+      connect_timeout_bounds_an_attempt;
+    Alcotest.test_case "a connect_timeout not positive is the timeout" `Quick
+      a_connect_timeout_not_positive_is_the_timeout;
     Alcotest.test_case "a read past the timeout" `Quick a_read_past_the_timeout;
     Alcotest.test_case "a connection left open lets its switch finish" `Quick
       a_connection_left_open_lets_its_switch_finish;

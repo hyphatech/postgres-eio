@@ -843,7 +843,9 @@ let session_attrs_name = function
 let establish t =
   let c = t.conninfo in
   let bound =
-    match c.connect_timeout_s with Some s -> Some s | None -> t.timeout_s
+    match c.connect_timeout_s with
+    | Some s when s > 0. -> Some s
+    | Some _ | None -> t.timeout_s
   in
   let terminate link =
     (try guard (fun () -> Eio.Flow.copy_string (encode P.Terminate) link.flow)
