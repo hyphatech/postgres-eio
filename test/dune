@@ -28,5 +28,6 @@
  (modules test_style)
  (libraries alcotest)
  (deps
+  ../OCAML.md
   (glob_files ../src/*.ml)
   (glob_files ../src/*.mli)))
