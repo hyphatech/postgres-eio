@@ -133,4 +133,6 @@ the wording of an error or a log line.
 The version lives only in the git tag (`0.1.0`, no `v`). A release renames
 `## Unreleased` in CHANGES.md to the version and date, and tags it. The GitHub
 release notes are that entry with each paragraph and bullet on one line,
-since GitHub keeps every line break in release notes.
+since GitHub keeps every line break in release notes. A release is
+pushed first and tagged only once CI is green on the commit the tag
+names: a broken build is never tagged.
