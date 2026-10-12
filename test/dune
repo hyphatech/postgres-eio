@@ -6,6 +6,7 @@
   ptime
   uuidm
   cstruct
+  ipaddr
   eio
   eio_main
   mtime

@@ -1,6 +1,8 @@
 (lang dune 3.18)
 (name postgres-eio)
 
+(implicit_transitive_deps false)
+
 (generate_opam_files true)
 
 (maintainers "Hypha Technologies Ltd <dev@hyphatech.io>")
