@@ -32,7 +32,6 @@ src/                 the library; every module has an .mli
   pool               a fixed-size pool
 test/
   test_postgres_eio  protocol cases, fake servers, and a real Postgres
-  test_style         the house rules that can be checked mechanically
   postgres/          the test server's image: certificates and pg_hba.conf
 ```
 
