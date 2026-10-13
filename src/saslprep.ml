@@ -923,7 +923,10 @@ let nfkc chars =
   Buffer.contents out
 
 (* 3) Prohibited characters. 4) Bidi: a string with any RTL character has
-   no LTR one, and starts and ends with RTL. *)
+   no LTR one, and starts and ends with RTL. Checked on the mapped characters
+   before NFKC, where RFC 4013 checks after it, because Postgres's
+   pg_saslprep does, and a password both sides prepare alike is what signs
+   in. *)
 let allowed chars =
   let codes = List.map Uchar.to_int chars in
   let prohibited c = in_table prohibited c || in_table unassigned c in

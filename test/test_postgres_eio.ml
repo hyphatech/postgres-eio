@@ -2801,6 +2801,12 @@ let saslprep_as_the_server_does () =
     [
       ("pgeio_bidi", "\\u05d0a", "\xd7\x90a");
       ("pgeio_control", "a\\u0007\\u00e9", "a\x07\xc3\xa9");
+      (* ACCOUNT OF between two RTL letters is neutral, but "a/c" under NFKC:
+         allowed checked before normalising, as the server does, and mixed
+         after, as RFC 4013 orders it. *)
+      ( "pgeio_normalised",
+        "\\u05d0\\u2100\\u05d0",
+        "\xd7\x90\xe2\x84\x80\xd7\x90" );
     ];
   Pg.close admin
 
