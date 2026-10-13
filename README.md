@@ -5,6 +5,7 @@
 [![license](https://img.shields.io/github/license/hyphatech/postgres-eio)](LICENSE)
 ![OCaml 5.5+](https://img.shields.io/badge/OCaml-5.5%2B-EC6813?logo=ocaml&logoColor=white)
 ![tested on PostgreSQL 18](https://img.shields.io/badge/tested%20on-PostgreSQL%2018-336791?logo=postgresql&logoColor=white)
+[![Hypha Stack](https://img.shields.io/badge/Hypha-Stack-d4a820?labelColor=15120e)](https://hyphatech.io/stack/)
 
 A native Postgres driver for OCaml 5 and Eio.
 
