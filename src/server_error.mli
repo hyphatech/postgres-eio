@@ -3,8 +3,8 @@
 type t
 
 val of_fields : (char * string) list -> t
-(** From an ErrorResponse's or a NoticeResponse's fields, as {!module-Protocol}
-    reads them. *)
+(** From an ErrorResponse's or a NoticeResponse's fields, each a code byte and
+    its value. *)
 
 val fields : t -> (char * string) list
 (** Every field, by its code byte, in the order the server sent them. *)

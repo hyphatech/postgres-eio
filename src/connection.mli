@@ -219,7 +219,12 @@ val copy_out_rows :
 (** Runs [COPY (select) TO STDOUT], decoding each text-format row for [row]
     ([None] is NULL). Like {!query}, for very large results. *)
 
-val status : t -> Protocol.transaction_status
+type transaction_status =
+  | Idle  (** not in a transaction block *)
+  | In_transaction
+  | Failed  (** in a transaction block that a failed statement aborted *)
+
+val status : t -> transaction_status
 (** As of the last ReadyForQuery read; with pipelined answers outstanding, call
     {!Pipeline.drain} first. *)
 

@@ -1,5 +1,20 @@
 # Changes
 
+## Unreleased
+
+- Breaking: `Conninfo.t`, `Conninfo.endpoint` and `Conninfo.auth_methods`
+  are private records. Their fields are read as before, and one is made
+  by `Conninfo.of_string`, so a key the driver comes to read is not a
+  breaking change. `{ c with database = name }` is
+  `Conninfo.with_database c name`, `{ c with connect_timeout = Some span }`
+  is `Conninfo.with_connect_timeout c span`, and any other key is set in
+  the connection string.
+- Breaking: `Postgres_eio.Protocol` and `Postgres_eio.Auth` are no longer
+  exported, so a message the protocol gains is not a breaking change.
+  `status` returns `Postgres_eio.transaction_status`: match
+  `Postgres_eio.Idle`, not `Postgres_eio.Protocol.Idle`. `Column.format`
+  is a type of its own, with the same constructors.
+
 ## 0.3.0 (2026-10-11)
 
 - Breaking: every duration is an `Mtime.Span.t` named for what it bounds,

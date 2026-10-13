@@ -2,8 +2,10 @@
    of the Postgres 18 docs. Backend messages are read whole, a byte at a
    time, and at generated splits. *)
 
-module P = Postgres_eio.Protocol
-module Auth = Postgres_eio.Auth
+(* The layers below the connection are no part of the library's interface,
+   and are reached here by the names dune gives them. *)
+module P = Postgres_eio__Protocol
+module Auth = Postgres_eio__Auth
 module Conninfo = Postgres_eio.Conninfo
 
 (* Messages, as hand-written bytes, so the reader is checked against the
@@ -562,6 +564,36 @@ let md5 () =
 
 (* Connection strings *)
 
+(* A connection string of these keys, their values as given. *)
+let conninfo pairs =
+  match Conninfo.of_string ~defaults:pairs "" with
+  | Ok c -> c
+  | Error e -> Alcotest.fail e
+
+let percent_encode s =
+  String.concat ""
+    (List.init (String.length s) (fun i ->
+         match s.[i] with
+         | ('A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '-' | '.' | '_' | '~') as c
+           ->
+             String.make 1 c
+         | c -> Printf.sprintf "%%%02X" (Char.code c)))
+
+(* [c] with these keys set, as its connection string would set them: its
+   URL, the keys after it, and a later key wins. An empty value unsets. *)
+let set (c : Conninfo.t) pairs =
+  let url = Conninfo.to_url c in
+  let query =
+    String.concat "&"
+      (List.map (fun (k, v) -> k ^ "=" ^ percent_encode v) pairs)
+  in
+  match
+    Conninfo.of_string
+      (url ^ (if String.contains url '?' then "&" else "?") ^ query)
+  with
+  | Ok c -> c
+  | Error e -> Alcotest.fail e
+
 (* Every field; multi-host and sign-in fields only when not default. *)
 let show_conninfo (t : Conninfo.t) =
   let endpoint (e : Conninfo.endpoint) =
@@ -829,7 +861,7 @@ let conninfo_cases =
           | Error e -> Alcotest.fail e
           | Ok t ->
               let url =
-                Conninfo.to_url { t with connect_timeout = Some span }
+                Conninfo.to_url (Conninfo.with_connect_timeout t span)
               in
               let key = "connect_timeout=" in
               let rec find i =
@@ -857,6 +889,31 @@ let conninfo_cases =
         Alcotest.(check string)
           "the longest" "18446744074"
           (written Mtime.Span.max_span));
+    Alcotest.test_case
+      "a database and a connect_timeout, set as the string sets them" `Quick
+      (fun () ->
+        let given =
+          [
+            ("host", "db");
+            ("user", "app");
+            ("dbname", "go");
+            ("sslmode", "require");
+          ]
+        in
+        let c = conninfo given in
+        let as_if key value =
+          show_conninfo (conninfo (given @ [ (key, value) ]))
+        in
+        Alcotest.(check string)
+          "another database" (as_if "dbname" "other")
+          (show_conninfo (Conninfo.with_database c "other"));
+        Alcotest.(check string)
+          "the empty one is the user's" (as_if "dbname" "")
+          (show_conninfo (Conninfo.with_database c ""));
+        Alcotest.(check string)
+          "a connect_timeout"
+          (as_if "connect_timeout" "7")
+          (show_conninfo (Conninfo.with_connect_timeout c Mtime.Span.(7 * s))));
     refuses "an sslmode that is none of them" "user=app sslmode=maybe" "sslmode";
     refuses "an unterminated quote" "user=app password='open" "closing quote";
     refuses "a key with no =" "user=app dbname" "no =";
@@ -914,59 +971,64 @@ let a_url_reads_back =
       map
         (fun ((h, address), port) ->
           let socket = String.starts_with ~prefix:"/" h in
-          {
-            Conninfo.host = (if socket then Unix_socket h else Tcp h);
-            address = (if socket then None else address);
-            port;
-            password = None;
-          })
+          (h, (if socket then "" else address), string_of_int port))
         (pair
            (pair
               (oneof_list [ "db"; "::1"; "/run/pg" ])
-              (oneof_list
-                 [
-                   None;
-                   Some Ipaddr.(V4 (V4.of_string_exn "10.0.0.5"));
-                   Some Ipaddr.(V6 V6.localhost);
-                 ]))
+              (oneof_list [ ""; "10.0.0.5"; "::1" ]))
            (int_range 1 65535)))
+  in
+  (* As the options key reads a word: a backslash keeps the next byte. *)
+  let escaped s =
+    String.concat ""
+      (List.init (String.length s) (fun i ->
+           match s.[i] with
+           | (' ' | '\\' | '\t' | '\n' | '\r') as c -> "\\" ^ String.make 1 c
+           | c -> String.make 1 c))
   in
   QCheck2.Test.make ~count:300 ~name:"a printed URL reads back as itself"
     QCheck2.Gen.(
       tup4 text (option text) text
         (pair (list_size (int_range 1 3) host) (list_small (pair text text))))
     (fun (user, password, database, (hosts, options)) ->
-      let t =
-        {
-          Conninfo.hosts;
-          user;
-          password;
-          database;
-          ssl_mode = Verify_ca;
-          ssl_root_cert = Some "/ca.pem";
-          ssl_cert = Some "/c.pem";
-          ssl_key = Some "/k.pem";
-          ssl_negotiation = Direct;
-          channel_binding = Binding_required;
-          require_auth =
-            { password = false; md5 = true; scram_sha_256 = true; none = false };
-          connect_timeout = Some Mtime.Span.(4 * s);
-          application_name = Some "demo app";
-          keepalives = false;
-          target_session_attrs = Prefer_standby;
-          load_balance_hosts = Random;
-          min_protocol_version = V3_0;
-          max_protocol_version = V3_2;
-          options =
-            List.map
-              (fun (k, v) ->
-                (String.map (function '=' | '-' -> '_' | c -> c) k, v))
-              options;
-        }
+      let each f = String.concat "," (List.map f hosts) in
+      let pairs =
+        [
+          ("host", each (fun (h, _, _) -> h));
+          ("hostaddr", each (fun (_, a, _) -> a));
+          ("port", each (fun (_, _, p) -> p));
+          ("user", user);
+          ("password", Option.value password ~default:"");
+          ("dbname", database);
+          ("sslmode", "verify-ca");
+          ("sslrootcert", "/ca.pem");
+          ("sslcert", "/c.pem");
+          ("sslkey", "/k.pem");
+          ("sslnegotiation", "direct");
+          ("channel_binding", "require");
+          ("require_auth", "md5,scram-sha-256");
+          ("connect_timeout", "4");
+          ("application_name", "demo app");
+          ("keepalives", "0");
+          ("target_session_attrs", "prefer-standby");
+          ("load_balance_hosts", "random");
+          ("max_protocol_version", "3.2");
+          ( "options",
+            String.concat " "
+              (List.map
+                 (fun (k, v) ->
+                   "-c "
+                   ^ escaped (String.map (function '=' -> '_' | c -> c) k)
+                   ^ "=" ^ escaped v)
+                 options) );
+        ]
       in
-      match Conninfo.of_string (Conninfo.to_url t) with
-      | Ok back -> String.equal (show_conninfo back) (show_conninfo t)
-      | Error e -> QCheck2.Test.fail_reportf "%s: %s" (Conninfo.to_url t) e)
+      match Conninfo.of_string ~defaults:pairs "" with
+      | Error e -> QCheck2.Test.fail_reportf "not read: %s" e
+      | Ok t -> (
+          match Conninfo.of_string (Conninfo.to_url t) with
+          | Ok back -> String.equal (show_conninfo back) (show_conninfo t)
+          | Error e -> QCheck2.Test.fail_reportf "%s: %s" (Conninfo.to_url t) e))
 
 (* Text forms *)
 
@@ -1378,19 +1440,20 @@ let base () =
   | Some (Error e) -> Alcotest.failf "POSTGRES_EIO_TEST_PG: %s" e
   | None -> Alcotest.fail "POSTGRES_EIO_TEST_PG is not set"
 
-let plain () = { (base ()) with ssl_mode = Disable }
+let plain () = set (base ()) [ ("sslmode", "disable") ]
 
 let port_of (c : Conninfo.t) =
   match c.hosts with e :: _ -> e.port | [] -> 5432
 
+(* One host, a socket's directory when it starts with a slash. *)
 let at ?port ?address host (c : Conninfo.t) =
-  let port =
-    match (port, c.hosts) with
-    | Some p, _ -> p
-    | None, e :: _ -> e.port
-    | None, [] -> 5432
-  in
-  { c with hosts = [ { Conninfo.host; address; port; password = None } ] }
+  let port = Option.value port ~default:(port_of c) in
+  set c
+    [
+      ("host", host);
+      ("hostaddr", Option.fold ~none:"" ~some:Ipaddr.to_string address);
+      ("port", string_of_int port);
+    ]
 
 let ca = "postgres/ca.crt"
 
@@ -1448,8 +1511,13 @@ let make_role env sw ?(encryption = "scram-sha-256") name password =
        | None -> ""));
   Pg.close admin
 
-let as_role c name password =
-  { c with Conninfo.user = name; password; database = c.Conninfo.database }
+let as_role (c : Conninfo.t) name password =
+  set c
+    [
+      ("user", name);
+      ("password", Option.value password ~default:"");
+      ("dbname", c.database);
+    ]
 
 let tls_in_use t =
   String.equal
@@ -1473,7 +1541,7 @@ let a_query_by_scram () =
     (Pg.Tag.command tag, Pg.Tag.rows tag);
   Alcotest.(check bool)
     "idle after" true
-    (match Pg.status t with P.Idle -> true | _ -> false);
+    (match Pg.status t with Pg.Idle -> true | _ -> false);
   Alcotest.(check bool)
     "the server said its version" true
     (match Pg.parameter t "server_version" with
@@ -1485,12 +1553,12 @@ let a_query_by_scram () =
 (* verify-full over TLS, signed in by SCRAM. *)
 let verify_full_over_tls () =
   with_eio @@ fun env sw ->
-  let c = { (base ()) with ssl_mode = Verify_full; ssl_root_cert = Some ca } in
+  let c = set (base ()) [ ("sslmode", "verify-full"); ("sslrootcert", ca) ] in
   let t = connect env sw c in
   Alcotest.(check bool) "over TLS" true (tls_in_use t);
   Alcotest.(check string) "and it answers" "1" (one t "select 1" []);
   Pg.close t;
-  let t = connect env sw (at (Tcp "127.0.0.1") c) in
+  let t = connect env sw (at "127.0.0.1" c) in
   Alcotest.(check bool) "an address the certificate names" true (tls_in_use t);
   Pg.close t
 
@@ -1499,7 +1567,7 @@ let verify_full_refuses_an_untrusted_certificate () =
   with_eio @@ fun env sw ->
   match
     connect_with env sw
-      { (base ()) with ssl_mode = Verify_full; ssl_root_cert = None }
+      (set (base ()) [ ("sslmode", "verify-full"); ("sslrootcert", "") ])
   with
   | Error (Pg.Io _) -> ()
   | Error e ->
@@ -1512,7 +1580,12 @@ let every_sslmode () =
   List.iter
     (fun (mode, root, over_tls) ->
       let t =
-        connect env sw { (base ()) with ssl_mode = mode; ssl_root_cert = root }
+        connect env sw
+          (set (base ())
+             [
+               ("sslmode", Conninfo.ssl_mode_to_string mode);
+               ("sslrootcert", Option.value root ~default:"");
+             ])
       in
       Alcotest.(check bool)
         (Conninfo.ssl_mode_to_string mode)
@@ -1550,7 +1623,7 @@ let cleartext_over_tls () =
   let t =
     connect env sw
       (as_role
-         { (base ()) with ssl_mode = Require }
+         (set (base ()) [ ("sslmode", "require") ])
          "pgeio_cleartext" (Some "clear-pass"))
   in
   Alcotest.(check string)
@@ -1602,10 +1675,7 @@ let cleartext_without_tls_is_refused () =
     a_fake_server env sw ~answer:(Some (msg 'R' (int32 3)))
   in
   let c =
-    {
-      (at ~port (Tcp "127.0.0.1") (plain ())) with
-      password = Some "never-sent";
-    }
+    set (at ~port "127.0.0.1" (plain ())) [ ("password", "never-sent") ]
   in
   (match connect_with env sw c with
   | Error (Pg.Refused m) ->
@@ -1645,7 +1715,7 @@ let over_a_unix_socket () =
           in
           Eio.Fiber.both (pass client upstream) (pass upstream client));
       `Stop_daemon);
-  let t = connect env sw (at (Unix_socket dir) c) in
+  let t = connect env sw (at dir c) in
   Alcotest.(check string) "a query over the socket" "7" (one t "select 7" []);
   Pg.close t
 
@@ -1710,7 +1780,7 @@ let a_running_statement_is_cancelled () =
   shorter "at once" took ~than:Mtime.Span.(2 * s);
   Alcotest.(check bool)
     "idle" true
-    (match Pg.status t with P.Idle -> true | _ -> false);
+    (match Pg.status t with Pg.Idle -> true | _ -> false);
   Alcotest.(check string) "and usable" "1" (one t "select 1" []);
   Alcotest.(check bool)
     "nothing running is nothing to cancel" true
@@ -1719,7 +1789,7 @@ let a_running_statement_is_cancelled () =
 
 let a_cancel_over_tls () =
   with_eio @@ fun env sw ->
-  let t = connect env sw { (base ()) with ssl_mode = Require } in
+  let t = connect env sw (set (base ()) [ ("sslmode", "require") ]) in
   let clock = Eio.Stdenv.mono_clock env in
   let answer = ref (Ok ([], Pg.Tag.empty)) in
   Eio.Fiber.both
@@ -1777,7 +1847,7 @@ let a_silent_server_times_out () =
      connect_with
        ~timeout:Mtime.Span.(300 * ms)
        env sw
-       (at ~port (Tcp "127.0.0.1") (plain ()))
+       (at ~port "127.0.0.1" (plain ()))
    with
   | Error Pg.Timeout -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
@@ -1789,11 +1859,14 @@ let a_silent_server_times_out () =
    applied to the attempt. *)
 let timed_out_after env sw ?timeout connect_timeout =
   let port, _, _ = a_fake_server env sw ~answer:None in
+  let c = at ~port "127.0.0.1" (plain ()) in
   let clock = Eio.Stdenv.mono_clock env in
   let started = Eio.Time.Mono.now clock in
   (match
      connect_with ?timeout env sw
-       { (at ~port (Tcp "127.0.0.1") (plain ())) with connect_timeout }
+       (Option.fold ~none:c
+          ~some:(Conninfo.with_connect_timeout c)
+          connect_timeout)
    with
   | Error Pg.Timeout -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
@@ -1999,9 +2072,9 @@ let transaction_status () =
   let t = connect env sw (plain ()) in
   let status () =
     match Pg.status t with
-    | P.Idle -> "idle"
-    | P.In_transaction -> "in"
-    | P.Failed -> "failed"
+    | Pg.Idle -> "idle"
+    | Pg.In_transaction -> "in"
+    | Pg.Failed -> "failed"
   in
   script t "begin";
   Alcotest.(check string) "54.7 ReadyForQuery T" "in" (status ());
@@ -2133,7 +2206,7 @@ let in_step t =
   Alcotest.(check bool) "open" false (Pg.closed t);
   Alcotest.(check bool)
     "idle" true
-    (match Pg.status t with P.Idle -> true | _ -> false);
+    (match Pg.status t with Pg.Idle -> true | _ -> false);
   Alcotest.(check string) "answering" "1" (one t "select 1" [])
 
 let show_rows rows =
@@ -2240,7 +2313,7 @@ let a_producer_that_raises () =
   | _ -> Alcotest.fail "the raise did not pass");
   Alcotest.(check bool)
     "the transaction is aborted" true
-    (match Pg.status t with P.Failed -> true | _ -> false);
+    (match Pg.status t with Pg.Failed -> true | _ -> false);
   script t "rollback";
   in_step t;
   Pg.close t
@@ -2330,8 +2403,17 @@ let a_cancelled_copy_closes () =
 
 (* Sign-in and connecting *)
 
-let endpoint ?(port = port_of (base ())) host =
-  { Conninfo.host = Tcp host; address = None; port; password = None }
+let endpoint ?(port = port_of (base ())) host = (host, port)
+
+let hosts c endpoints =
+  set c
+    [
+      ("host", String.concat "," (List.map fst endpoints));
+      ("hostaddr", "");
+      ( "port",
+        String.concat "," (List.map (fun (_, p) -> string_of_int p) endpoints)
+      );
+    ]
 
 let refused_saying what needle = function
   | Error (Pg.Refused m) ->
@@ -2426,7 +2508,7 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
           try startup () with End_of_file | Eio.Io _ -> ()));
   (port, taken)
 
-let fake port = at ~port (Tcp "127.0.0.1") (plain ())
+let fake port = at ~port "127.0.0.1" (plain ())
 
 let a_sign_in_bound_to_tls () =
   with_eio @@ fun env sw ->
@@ -2434,18 +2516,18 @@ let a_sign_in_bound_to_tls () =
     (fun negotiation ->
       let t =
         connect env sw
-          {
-            (base ()) with
-            ssl_mode = Verify_full;
-            ssl_root_cert = Some ca;
-            ssl_negotiation = negotiation;
-            channel_binding = Binding_required;
-          }
+          (set (base ())
+             [
+               ("sslmode", "verify-full");
+               ("sslrootcert", ca);
+               ("sslnegotiation", negotiation);
+               ("channel_binding", "require");
+             ])
       in
       Alcotest.(check bool)
         "54.3.1 SCRAM-SHA-256-PLUS, over TLS" true (tls_in_use t);
       Pg.close t)
-    [ Postgres; Direct ]
+    [ "postgres"; "direct" ]
 
 (* A random generator the application set is the one every exchange draws
    from: connecting replaces nothing the application chose. *)
@@ -2470,7 +2552,8 @@ let a_required_binding_refuses_a_server_without_one () =
   in
   refused_saying "a server offering only SCRAM-SHA-256" "channel binding"
     (connect_with env sw
-       { (fake port) with ssl_mode = Allow; channel_binding = Binding_required });
+       (set (fake port)
+          [ ("sslmode", "allow"); ("channel_binding", "require") ]));
   Eio.Promise.await closed;
   Alcotest.(check int)
     "54.3.1 not a byte after the offer" 0 (Buffer.length heard)
@@ -2537,7 +2620,7 @@ let scram_needs_the_servers_proof () =
   with_eio @@ fun env sw ->
   let connect_after after_proof =
     connect_with env sw
-      { (fake (a_scram_server env sw ~after_proof)) with password = Some "p" }
+      (set (fake (a_scram_server env sw ~after_proof)) [ ("password", "p") ])
   in
   (match connect_after "" with
   | Error (Pg.Protocol m) ->
@@ -2557,19 +2640,12 @@ let scram_needs_the_servers_proof () =
    sending the password. *)
 let require_auth_refuses_what_it_does_not_allow () =
   with_eio @@ fun env sw ->
-  let require =
-    {
-      Conninfo.password = false;
-      md5 = false;
-      scram_sha_256 = true;
-      none = false;
-    }
-  in
+  let require = ("require_auth", "scram-sha-256") in
   let port, heard, closed =
     a_fake_server env sw ~answer:(Some (msg 'R' (int32 0) ^ msg 'Z' "I"))
   in
   refused_saying "a server that asks for nothing" "without asking"
-    (connect_with env sw { (fake port) with require_auth = require });
+    (connect_with env sw (set (fake port) [ require ]));
   Eio.Promise.await closed;
   Alcotest.(check int) "54.2.1 nothing after" 0 (Buffer.length heard);
   let port, heard, closed =
@@ -2577,31 +2653,27 @@ let require_auth_refuses_what_it_does_not_allow () =
   in
   refused_saying "a server that asks for a password" "require_auth"
     (connect_with env sw
-       { (fake port) with require_auth = require; password = Some "never-sent" });
+       (set (fake port) [ require; ("password", "never-sent") ]));
   Eio.Promise.await closed;
   Alcotest.(check bool)
     "54.3 the password never sent" false
     (contains (Buffer.contents heard) "never-sent");
 
-  let t = connect env sw { (plain ()) with require_auth = require } in
+  let t = connect env sw (set (plain ()) [ require ]) in
   Pg.close t;
   refused_saying "md5 only, where the server asks for SCRAM" "require_auth"
-    (connect_with env sw
-       {
-         (plain ()) with
-         require_auth = { require with scram_sha_256 = false; md5 = true };
-       })
+    (connect_with env sw (set (plain ()) [ ("require_auth", "md5") ]))
 
 let direct_tls () =
   with_eio @@ fun env sw ->
   let t =
     connect env sw
-      {
-        (base ()) with
-        ssl_mode = Verify_full;
-        ssl_root_cert = Some ca;
-        ssl_negotiation = Direct;
-      }
+      (set (base ())
+         [
+           ("sslmode", "verify-full");
+           ("sslrootcert", ca);
+           ("sslnegotiation", "direct");
+         ])
   in
   Alcotest.(check bool) "54.2.10 TLS from the first byte" true (tls_in_use t);
   cancelled env t;
@@ -2613,10 +2685,12 @@ let prefer_falls_back () =
   List.iter
     (fun (what, ssl) ->
       let port, taken = a_fake_postgres env sw ~ssl () in
-      let t = connect env sw { (fake port) with ssl_mode = Prefer } in
+      let t = connect env sw (set (fake port) [ ("sslmode", "prefer") ]) in
       Alcotest.(check int) (what ^ ": a second connection, plain") 2 !taken;
       Pg.close t;
-      match connect_with env sw { (fake port) with ssl_mode = Require } with
+      match
+        connect_with env sw (set (fake port) [ ("sslmode", "require") ])
+      with
       | Ok _ -> Alcotest.failf "%s: require connected without TLS" what
       | Error _ -> ())
     [
@@ -2628,36 +2702,34 @@ let a_client_certificate () =
   with_eio @@ fun env sw ->
   make_role env sw "pgeio_cert" None;
   let c =
-    {
-      (as_role (base ()) "pgeio_cert" None) with
-      ssl_mode = Verify_full;
-      ssl_root_cert = Some ca;
-      ssl_cert = Some "postgres/client.crt";
-      ssl_key = Some "postgres/client.key";
-    }
+    set
+      (as_role (base ()) "pgeio_cert" None)
+      [
+        ("sslmode", "verify-full");
+        ("sslrootcert", ca);
+        ("sslcert", "postgres/client.crt");
+        ("sslkey", "postgres/client.key");
+      ]
   in
   let t = connect env sw c in
   Alcotest.(check string)
     "signed in by the certificate" "pgeio_cert"
     (one t "select current_user::text" []);
   Pg.close t;
-  (match connect_with env sw { c with ssl_cert = None; ssl_key = None } with
+  (match connect_with env sw (set c [ ("sslcert", ""); ("sslkey", "") ]) with
   | Error (Pg.Server _) -> ()
   | _ -> Alcotest.fail "the server let in a client with no certificate");
   refused_saying "an encrypted key" "encrypted"
     (connect_with env sw
-       { c with ssl_key = Some "postgres/client-encrypted.key" });
+       (set c [ ("sslkey", "postgres/client-encrypted.key") ]));
   refused_saying "a certificate with no key" "come together"
-    (connect_with env sw { c with ssl_key = None })
+    (connect_with env sw (set c [ ("sslkey", "") ]))
 
 (* Multiple hosts with one refusing; random order varies. *)
 let several_hosts () =
   with_eio @@ fun env sw ->
   let c =
-    {
-      (plain ()) with
-      hosts = [ endpoint ~port:1 "127.0.0.1"; endpoint "localhost" ];
-    }
+    hosts (plain ()) [ endpoint ~port:1 "127.0.0.1"; endpoint "localhost" ]
   in
   let t = connect env sw c in
   Alcotest.(check string)
@@ -2666,10 +2738,8 @@ let several_hosts () =
   let a, taken_a = a_fake_postgres env sw () in
   let b, taken_b = a_fake_postgres env sw () in
   let both =
-    {
-      (plain ()) with
-      hosts = [ endpoint ~port:a "127.0.0.1"; endpoint ~port:b "127.0.0.1" ];
-    }
+    hosts (plain ())
+      [ endpoint ~port:a "127.0.0.1"; endpoint ~port:b "127.0.0.1" ]
   in
   for _ = 1 to 10 do
     Pg.close (connect env sw both)
@@ -2678,7 +2748,7 @@ let several_hosts () =
     "in order, the first every time" (10, 0) (!taken_a, !taken_b);
   let application's = Random.get_state () in
   for _ = 1 to 30 do
-    Pg.close (connect env sw { both with load_balance_hosts = Random })
+    Pg.close (connect env sw (set both [ ("load_balance_hosts", "random") ]))
   done;
   Alcotest.(check bool) "at random, both" true (!taken_a > 10 && !taken_b > 0);
   (* The stdlib's generator starts from a fixed seed in every process, so
@@ -2694,10 +2764,7 @@ let several_hosts () =
 let a_refused_address_leaves_no_socket () =
   with_eio @@ fun env sw ->
   let c =
-    {
-      (plain ()) with
-      hosts = [ endpoint ~port:1 "127.0.0.1"; endpoint "localhost" ];
-    }
+    hosts (plain ()) [ endpoint ~port:1 "127.0.0.1"; endpoint "localhost" ]
   in
   let open_descriptors () = Array.length (Sys.readdir "/dev/fd") in
   let before = open_descriptors () in
@@ -2743,8 +2810,8 @@ let the_kind_of_host_asked_for () =
   let standing (t : Pg.t) =
     Option.value (Pg.parameter t "in_hot_standby") ~default:"?"
   in
-  let at_hosts hosts attrs =
-    { (plain ()) with hosts; target_session_attrs = attrs }
+  let at_hosts endpoints attrs =
+    set (hosts (plain ()) endpoints) [ ("target_session_attrs", attrs) ]
   in
   let reached hosts attrs =
     let t = connect env sw (at_hosts hosts attrs) in
@@ -2755,31 +2822,31 @@ let the_kind_of_host_asked_for () =
   let standby = endpoint ~port:standby "127.0.0.1" in
   Alcotest.(check string)
     "read-write skips the standby" "off"
-    (reached [ standby; primary ] Read_write);
+    (reached [ standby; primary ] "read-write");
   Alcotest.(check string)
     "primary too" "off"
-    (reached [ standby; primary ] Primary);
+    (reached [ standby; primary ] "primary");
   Alcotest.(check string)
     "standby, wherever it is" "on"
-    (reached [ primary; standby ] Standby);
+    (reached [ primary; standby ] "standby");
   Alcotest.(check string)
     "read-only takes a standby" "on"
-    (reached [ standby; primary ] Read_only);
+    (reached [ standby; primary ] "read-only");
   Alcotest.(check string)
     "prefer-standby, with none, takes any" "off"
-    (reached [ primary ] Prefer_standby);
+    (reached [ primary ] "prefer-standby");
   Alcotest.(check string)
     "prefer-standby, with one" "on"
-    (reached [ primary; standby ] Prefer_standby);
+    (reached [ primary; standby ] "prefer-standby");
   refused_saying "standby, with none" "target_session_attrs=standby"
-    (connect_with env sw (at_hosts [ primary ] Standby));
+    (connect_with env sw (at_hosts [ primary ] "standby"));
   refused_saying "a server that does not say" "does not say"
     (connect_with env sw
-       (at_hosts [ endpoint ~port:silent "127.0.0.1" ] Read_write))
+       (at_hosts [ endpoint ~port:silent "127.0.0.1" ] "read-write"))
 
 let protocol_3_2 () =
   with_eio @@ fun env sw ->
-  let t = connect env sw { (plain ()) with max_protocol_version = V3_2 } in
+  let t = connect env sw (set (plain ()) [ ("max_protocol_version", "3.2") ]) in
   Alcotest.(check string) "54.2.1 3.2 agreed" "1" (one t "select 1" []);
   cancelled env t;
   Pg.close t;
@@ -2787,14 +2854,14 @@ let protocol_3_2 () =
   let port, _ =
     a_fake_postgres env sw ~before:(msg 'v' (int32 0 ^ int32 0)) ()
   in
-  let asked = { (fake port) with max_protocol_version = V3_2 } in
+  let asked = set (fake port) [ ("max_protocol_version", "3.2") ] in
   Pg.close (connect env sw asked);
   refused_saying "54.2.1 below min_protocol_version" "below"
-    (connect_with env sw { asked with min_protocol_version = V3_2 })
+    (connect_with env sw (set asked [ ("min_protocol_version", "3.2") ]))
 
 let options_become_settings () =
   with_eio @@ fun env sw ->
-  let c = { (plain ()) with options = [ ("search_path", "pgeio_options") ] } in
+  let c = set (plain ()) [ ("options", "-c search_path=pgeio_options") ] in
   let t = connect env sw c in
   Alcotest.(check string)
     "sent at start-up" "pgeio_options"
@@ -2819,7 +2886,7 @@ let nothing_from_the_environment_unasked () =
   let t =
     connect env sw
       (match Conninfo.of_string (Option.value target ~default:"") with
-      | Ok c -> { c with ssl_mode = Disable }
+      | Ok c -> set c [ ("sslmode", "disable") ]
       | Error e -> Alcotest.fail e)
   in
   Alcotest.(check string)
@@ -3015,7 +3082,7 @@ let what_arrives_during_a_listen_is_kept () =
 let a_killed_backend_is_a_reconnection () =
   with_eio @@ fun env sw ->
   let l =
-    listener env sw { (plain ()) with application_name = Some "pgeio-killed" }
+    listener env sw (set (plain ()) [ ("application_name", "pgeio-killed") ])
   in
   ok_pg (Pg.Listener.listen l "pgeio_killed");
   let admin = connect env sw (plain ()) in
@@ -3032,7 +3099,7 @@ let a_killed_backend_is_a_reconnection () =
 let a_silent_network_is_found () =
   with_eio @@ fun env sw ->
   let port, silence = a_proxy env sw in
-  let c = at ~port (Tcp "127.0.0.1") (plain ()) in
+  let c = at ~port "127.0.0.1" (plain ()) in
   let l =
     listener
       ~heartbeat:Mtime.Span.(300 * ms)
@@ -3076,7 +3143,7 @@ let a_quiet_listener_outlives_its_heartbeats () =
       Pg.Listener.close l;
       Pg.close n)
     [
-      ("over TLS", { (base ()) with ssl_mode = Require });
+      ("over TLS", set (base ()) [ ("sslmode", "require") ]);
       ("in the clear", plain ());
     ]
 
@@ -3104,7 +3171,7 @@ let a_cancelled_wait_keeps_listening () =
       Pg.Listener.close l;
       Pg.close n)
     [
-      ("over TLS", { (base ()) with ssl_mode = Require });
+      ("over TLS", set (base ()) [ ("sslmode", "require") ]);
       ("in the clear", plain ());
     ]
 
@@ -3232,10 +3299,9 @@ let a_refused_sign_in_is_returned () =
   make_role env sw "pgeio_listener" (Some "first");
   let l =
     listener env sw
-      {
-        (as_role (plain ()) "pgeio_listener" (Some "first")) with
-        application_name = Some "pgeio-refused";
-      }
+      (set
+         (as_role (plain ()) "pgeio_listener" (Some "first"))
+         [ ("application_name", "pgeio-refused") ])
   in
   ok_pg (Pg.Listener.listen l "pgeio_refused");
   let admin = connect env sw (plain ()) in
@@ -3674,7 +3740,7 @@ let a_server_that_answers_big env sw ~size =
           try statements ~parsed:false ~copy:false
           with End_of_file | Eio.Io _ -> ());
       `Stop_daemon);
-  { (at ~port (Tcp "127.0.0.1") (plain ())) with password = None }
+  set (at ~port "127.0.0.1" (plain ())) [ ("password", "") ]
 
 (* A pipeline and a COPY far larger than the socket buffers, against a
    server that stops reading while writing: writing before reading would
@@ -4070,15 +4136,14 @@ let no_secret_in_the_log () =
           (fun mode ->
             let t =
               connect env sw
-                {
-                  (as_role (base ()) "pgeio_scram" (Some "pw-SECRET-1")) with
-                  ssl_mode = mode;
-                }
+                (set
+                   (as_role (base ()) "pgeio_scram" (Some "pw-SECRET-1"))
+                   [ ("sslmode", mode) ])
             in
             ignore (rows t "select $1::text" [ Some "token-SECRET-2" ]);
             ignore (Pg.execute t "select $1::int" ~params:[ Some "SECRET-3" ]);
             Pg.close t)
-          [ Conninfo.Disable; Conninfo.Require ])
+          [ "disable"; "require" ])
   in
   Alcotest.(check bool)
     "the case logged something" true
@@ -4243,10 +4308,17 @@ let bytes_bound () =
    via [hostaddr], since nothing resolves it. *)
 let a_name_tls_cannot_carry () =
   with_eio @@ fun env sw ->
-  let c = at ~address:Ipaddr.(V4 V4.localhost) (Tcp "pg_test") (base ()) in
+  let c = at ~address:Ipaddr.(V4 V4.localhost) "pg_test" (base ()) in
   List.iter
     (fun (mode, root) ->
-      let t = connect env sw { c with ssl_mode = mode; ssl_root_cert = root } in
+      let t =
+        connect env sw
+          (set c
+             [
+               ("sslmode", Conninfo.ssl_mode_to_string mode);
+               ("sslrootcert", Option.value root ~default:"");
+             ])
+      in
       Alcotest.(check bool)
         (Conninfo.ssl_mode_to_string mode)
         true (tls_in_use t);
@@ -4254,7 +4326,7 @@ let a_name_tls_cannot_carry () =
     [ (Conninfo.Prefer, None); (Require, None); (Verify_ca, Some ca) ];
   match
     connect_with env sw
-      { c with ssl_mode = Verify_full; ssl_root_cert = Some ca }
+      (set c [ ("sslmode", "verify-full"); ("sslrootcert", ca) ])
   with
   | Error (Pg.Refused m) ->
       Alcotest.(check bool) m true (contains m "not a name TLS can check")
@@ -4267,7 +4339,7 @@ let a_close_sends_terminate () =
   let port, heard, closed =
     a_fake_server env sw ~answer:(Some (msg 'R' (int32 0) ^ msg 'Z' "I"))
   in
-  let t = connect env sw (at ~port (Tcp "127.0.0.1") (plain ())) in
+  let t = connect env sw (at ~port "127.0.0.1" (plain ())) in
   Pg.close t;
   Eio.Promise.await closed;
   Alcotest.(check string)
@@ -4285,13 +4357,13 @@ let drain_and_flush () =
   ignore (q "begin");
   Alcotest.(check bool)
     "not read yet" true
-    (match Pg.status t with P.Idle -> true | _ -> false);
+    (match Pg.status t with Pg.Idle -> true | _ -> false);
   Alcotest.(check (result unit string))
     "drained" (Ok ())
     (Result.map_error Pg.error_to_string (Pg.Pipeline.drain t));
   Alcotest.(check bool)
     "the status current" true
-    (match Pg.status t with P.In_transaction -> true | _ -> false);
+    (match Pg.status t with Pg.In_transaction -> true | _ -> false);
   Alcotest.(check bool)
     "the error kept in its answer" true
     (match Pg.Pipeline.get failed with
@@ -4612,7 +4684,7 @@ let a_cancelled_borrowers_statement_is_stopped_at_the_server () =
   borrow p (fun t ->
       Alcotest.(check bool)
         "idle" true
-        (match Pg.status t with P.Idle -> true | _ -> false);
+        (match Pg.status t with Pg.Idle -> true | _ -> false);
       Alcotest.(check string) "and taking statements" "1" (one t "select 1" []));
   Pg.Pool.close p
 
@@ -4674,7 +4746,7 @@ let a_cancelled_borrower_returns_at_the_cancellation () =
   borrow p (fun t ->
       Alcotest.(check bool)
         "lent idle" true
-        (match Pg.status t with P.Idle -> true | _ -> false);
+        (match Pg.status t with Pg.Idle -> true | _ -> false);
       Alcotest.(check bool)
         "on a connection made again" false
         (String.equal !pid (one t "select pg_backend_pid()::text" [])));
@@ -4722,7 +4794,7 @@ let a_transaction_left_open_is_rolled_back () =
   borrow p (fun t ->
       Alcotest.(check bool)
         "given out idle" true
-        (match Pg.status t with P.Idle -> true | _ -> false);
+        (match Pg.status t with Pg.Idle -> true | _ -> false);
       Alcotest.(check string)
         "and nothing kept" "0"
         (one t "select count(*) from pgeio_open" []);
@@ -4731,7 +4803,7 @@ let a_transaction_left_open_is_rolled_back () =
   borrow p (fun t ->
       Alcotest.(check bool)
         "an aborted one too" true
-        (match Pg.status t with P.Idle -> true | _ -> false);
+        (match Pg.status t with Pg.Idle -> true | _ -> false);
       script t "drop table pgeio_open");
   Pg.Pool.close p
 
@@ -4750,7 +4822,7 @@ let a_pipeline_left_unread () =
   borrow p (fun t ->
       Alcotest.(check bool)
         "given out idle" true
-        (match Pg.status t with P.Idle -> true | _ -> false);
+        (match Pg.status t with Pg.Idle -> true | _ -> false);
       Alcotest.(check string)
         "and the transaction rolled back" "0"
         (one t "select count(*) from pgeio_unread" []);
@@ -4841,7 +4913,7 @@ let reset_false_keeps_the_session () =
         "the setting kept" "Asia/Tokyo" (one t "show timezone" []);
       Alcotest.(check bool)
         "and the transaction rolled back" true
-        (match Pg.status t with P.Idle -> true | _ -> false));
+        (match Pg.status t with Pg.Idle -> true | _ -> false));
   Pg.Pool.close p
 
 (* Even with [~reset:false]: an idle pooled connection reads nothing, so
@@ -5154,7 +5226,7 @@ let a_cancelled_borrow_in_another_domain () =
 (* A TLS session made on one domain carries statements on another. *)
 let a_tls_connection_in_another_domain () =
   with_eio @@ fun env sw ->
-  let p = shared_pool ~c:{ (base ()) with ssl_mode = Require } env sw in
+  let p = shared_pool ~c:(set (base ()) [ ("sslmode", "require") ]) env sw in
   elsewhere env (fun () ->
       Alcotest.(check bool) "over TLS" true (borrow p tls_in_use));
   Pg.Pool.close p

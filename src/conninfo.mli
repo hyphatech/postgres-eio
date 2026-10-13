@@ -32,7 +32,7 @@ type channel_binding =
   | Binding_preferred  (** bind when offered -- the default *)
   | Binding_required  (** refuse, before sending secrets, if not bound *)
 
-type auth_methods = {
+type auth_methods = private {
   password : bool;  (** a cleartext password, inside TLS *)
   md5 : bool;
   scram_sha_256 : bool;
@@ -59,7 +59,7 @@ type host =
   | Unix_socket of string
       (** the directory of [.s.PGSQL.<port>]; a host starting with [/] *)
 
-type endpoint = {
+type endpoint = private {
   host : host;
       (** the name TLS verifies; [localhost] by default, or the address when
           only [hostaddr] is given *)
@@ -71,7 +71,7 @@ type endpoint = {
       (** from {!passfile}, used when [password] is absent *)
 }
 
-type t = {
+type t = private {
   hosts : endpoint list;
       (** at least one: [host=a,b port=1,2], or [postgres://a:1,b:2/] *)
   user : string;  (** required *)
@@ -100,6 +100,8 @@ type t = {
       (** [-c name=value], [-cname=value] and [--name=value] from [options],
           sent as startup parameters *)
 }
+(** Read by its fields, and made by {!of_string}: a key is set in the connection
+    string, or by {!with_database} and {!with_connect_timeout}. *)
 
 val of_string : ?defaults:(string * string) list -> string -> (t, string) result
 (** Parses either form. [defaults] (e.g. from {!environment}) fill keys the
@@ -116,6 +118,13 @@ val passfile : string -> t -> t
     escapes, first match wins. Hosts match as written (a socket by its
     directory). Locating the file and checking its permissions (libpq refuses
     one others can read) is the caller's job. *)
+
+val with_database : t -> string -> t
+(** [t] connecting to another database, as [dbname] names it: the empty string
+    is the user's name. *)
+
+val with_connect_timeout : t -> Mtime.Span.t -> t
+(** [t] bounding each address attempt by the span, as [connect_timeout] does. *)
 
 val to_url : t -> string
 (** A URL that parses back to [t], minus {!passfile} passwords.

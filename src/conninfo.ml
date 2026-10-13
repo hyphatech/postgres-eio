@@ -477,6 +477,12 @@ let of_pairs pairs =
       options;
     }
 
+(* As [dbname] reads: empty is unset, which is the user's name. *)
+let with_database t database =
+  { t with database = (if String.equal database "" then t.user else database) }
+
+let with_connect_timeout t span = { t with connect_timeout = Some span }
+
 (* URLs *)
 
 let hex c =

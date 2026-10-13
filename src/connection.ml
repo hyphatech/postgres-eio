@@ -1982,7 +1982,14 @@ let copy_out_rows t ~select ~init ~row =
 
 (* Lifecycle *)
 
-let status t = t.status
+type transaction_status = Idle | In_transaction | Failed
+
+let status t =
+  match t.status with
+  | P.Idle -> Idle
+  | P.In_transaction -> In_transaction
+  | P.Failed -> Failed
+
 let parameter t name = List.assoc_opt name t.settings
 let closed t = Option.is_none t.link
 let statement_cache t = t.statement_cache

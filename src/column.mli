@@ -1,6 +1,6 @@
 (** A column of a result, as the server describes it before the first row. *)
 
-type format = Protocol.format =
+type format =
   | Text  (** the type's text form, as [psql] prints it *)
   | Binary  (** the type's binary form, as the server stores it *)
 

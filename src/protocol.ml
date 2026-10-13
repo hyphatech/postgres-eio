@@ -8,7 +8,7 @@ type transaction_status = Idle | In_transaction | Failed
 (* Frontend messages *)
 
 type target = Statement | Portal
-type format = Text | Binary
+type format = Column.format = Text | Binary
 
 type frontend =
   | Startup of { minor : int; parameters : (string * string) list }

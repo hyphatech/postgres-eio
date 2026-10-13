@@ -88,8 +88,8 @@ let queue_reset t e =
   let conn = e.conn in
   let rollback =
     match C.status conn with
-    | Protocol.Idle -> []
-    | Protocol.In_transaction | Protocol.Failed -> [ "rollback" ]
+    | C.Idle -> []
+    | C.In_transaction | C.Failed -> [ "rollback" ]
   in
   let unlisten =
     match C.parameter conn "in_hot_standby" with

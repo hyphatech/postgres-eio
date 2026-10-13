@@ -15,7 +15,7 @@ type target =
   | Statement  (** a prepared statement, made by Parse *)
   | Portal  (** a portal, made by Bind *)
 
-type format = Text | Binary
+type format = Column.format = Text | Binary
 
 type frontend =
   | Startup of { minor : int; parameters : (string * string) list }
