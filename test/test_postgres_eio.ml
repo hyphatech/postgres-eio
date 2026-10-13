@@ -2475,6 +2475,84 @@ let a_required_binding_refuses_a_server_without_one () =
   Alcotest.(check int)
     "54.3.1 not a byte after the offer" 0 (Buffer.length heard)
 
+(* A fake server that asks for SCRAM-SHA-256, takes any proof, writes
+   [after_proof] and then signs the client in, so a client that does not
+   check the server's proof connects. *)
+let a_scram_server env sw ~after_proof =
+  let listener =
+    Eio.Net.listen ~sw ~backlog:4 (Eio.Stdenv.net env)
+      (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+  in
+  let port =
+    match Eio.Net.listening_addr listener with `Tcp (_, p) -> p | `Unix _ -> 0
+  in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+      Eio.Net.run_server listener ~on_error:ignore (fun flow _ ->
+          let r = Eio.Buf_read.of_flow flow ~max_size:65536 in
+          let take_int32 () =
+            Int32.to_int (String.get_int32_be (Eio.Buf_read.take 4 r) 0)
+          in
+          let write s = Eio.Flow.copy_string s flow in
+          let message () =
+            ignore (Eio.Buf_read.any_char r);
+            Eio.Buf_read.take (take_int32 () - 4) r
+          in
+          let rec startup () =
+            let body = Eio.Buf_read.take (take_int32 () - 4) r in
+            if
+              String.length body = 4
+              && Int32.equal (String.get_int32_be body 0) 80877103l
+            then begin
+              write "N";
+              startup ()
+            end
+          in
+          try
+            startup ();
+            write (msg 'R' (int32 10 ^ cstr "SCRAM-SHA-256" ^ "\000"));
+            let client_nonce =
+              match List.rev (String.split_on_char ',' (message ())) with
+              | last :: _ when String.starts_with ~prefix:"r=" last ->
+                  String.sub last 2 (String.length last - 2)
+              | _ -> ""
+            in
+            write
+              (msg 'R'
+                 (int32 11 ^ "r=" ^ client_nonce ^ "server,s=c2FsdA==,i=4096"));
+            ignore (message ());
+            write
+              (after_proof
+              ^ msg 'R' (int32 0)
+              ^ msg 'K' (int32 1 ^ "keys")
+              ^ msg 'Z' "I");
+            while true do
+              ignore (message ())
+            done
+          with End_of_file | Eio.Io _ -> ()));
+  port
+
+(* The server proves it knows the password in AuthenticationSASLFinal, and
+   a server that skips it or proves nothing is not signed in to. *)
+let scram_needs_the_servers_proof () =
+  with_eio @@ fun env sw ->
+  let connect_after after_proof =
+    connect_with env sw
+      { (fake (a_scram_server env sw ~after_proof)) with password = Some "p" }
+  in
+  (match connect_after "" with
+  | Error (Pg.Protocol m) ->
+      Alcotest.(check bool)
+        ("AuthenticationOk without the proof: " ^ m)
+        true
+        (contains m "AuthenticationSASLFinal")
+  | Error e ->
+      Alcotest.failf "AuthenticationOk without the proof: %s"
+        (Pg.error_to_string e)
+  | Ok _ -> Alcotest.fail "AuthenticationOk without the proof: connected");
+  refused_saying "a proof that is not the password's" "signature"
+    (connect_after
+       (msg 'R' (int32 12 ^ "v=eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=")))
+
 (* require_auth=scram-sha-256 refuses trust and password requests without
    sending the password. *)
 let require_auth_refuses_what_it_does_not_allow () =
@@ -4453,6 +4531,8 @@ let connection_cases =
       the_applications_random_generator_is_kept;
     Alcotest.test_case "54.3.1 a required binding refuses a server without one"
       `Quick a_required_binding_refuses_a_server_without_one;
+    Alcotest.test_case "54.3.1 SCRAM needs the server's proof" `Quick
+      scram_needs_the_servers_proof;
     Alcotest.test_case "require_auth refuses what it does not allow" `Quick
       require_auth_refuses_what_it_does_not_allow;
     Alcotest.test_case "54.2.10 direct TLS" `Quick direct_tls;
