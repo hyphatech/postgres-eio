@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.4.0 (2026-10-13)
 
 - Breaking: `Conninfo.t`, `Conninfo.endpoint` and `Conninfo.auth_methods`
   are private records. Their fields are read as before, and one is made
