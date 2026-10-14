@@ -6,7 +6,7 @@ for anyone changing it, human or agent. Users start at [README.md](README.md).
 ## Commands
 
 ```sh
-make setup   # once: local opam switch in ./_opam, all dependencies
+make setup   # once: the switch hypha-postgres-eio, all dependencies
 make test    # starts the test Postgres in Docker, runs every test
 make lint    # formatting, odoc, and the release build
 make fmt     # format in place
