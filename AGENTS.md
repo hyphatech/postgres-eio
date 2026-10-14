@@ -6,15 +6,17 @@ for anyone changing it, human or agent. Users start at [README.md](README.md).
 ## Commands
 
 ```sh
-make setup   # once: local opam switch in ./_opam, all dependencies
+make setup   # once: dune's tools (formatter, odoc, language server, Merlin)
 make test    # starts the test Postgres in Docker, runs every test
 make lint    # formatting, odoc, and the release build
 make fmt     # format in place
 ```
 
-`make test` needs `docker compose`. Without
-`POSTGRES_EIO_TEST_PG` the cases that need a server are skipped, and the test
-output says so. CI runs `make lint` and `make test` on OCaml 5.5.
+Only dune is on PATH, 3.24 or later: `dune build` builds the dependencies
+and OCaml itself as it needs them. `make test` needs `docker compose`.
+Without `POSTGRES_EIO_TEST_PG` the cases that need a server are skipped,
+and the test output says so. CI runs `make lint` and `make test` on OCaml
+5.5, and builds with the oldest versions the opam file allows.
 
 ## Layout
 
