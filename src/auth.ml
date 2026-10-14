@@ -29,6 +29,11 @@ let hi password salt iterations =
   in
   go 2 u1 u1
 
+(* The most iterations Hi is run for. It never yields, so every timeout on
+   its domain waits for it: a million cost 0.8 s on an Apple M4 Pro, past
+   OWASP's 600,000 for PBKDF2-HMAC-SHA256 and Postgres's default of 4096,
+   where a server asking for INT_MAX would hold the domain for half an hour. *)
+let max_iterations = 1_000_000
 let b64 s = Base64.encode_string s
 
 let unb64 what s =
@@ -111,6 +116,13 @@ let client_final t server_first =
       else
         let* salt = unb64 "the server's salt" salt in
         match int_of_string_opt iterations with
+        | Some i when i > max_iterations ->
+            Error
+              (Printf.sprintf
+                 "the server asks for %d SCRAM iterations, past the %d this \
+                  driver computes, since its domain does nothing else \
+                  meanwhile"
+                 i max_iterations)
         | Some i when i >= 1 ->
             let salted = hi t.password salt i in
             let client_key = hmac salted "Client Key" in

@@ -52,8 +52,8 @@ val client_first :
 
 val client_final : scram -> string -> (proven * string, string) result
 (** The client-final-message for the server-first-message. Errors on a nonce
-    that does not extend the client's, a non-base64 salt, a non-positive
-    iteration count, or a mandatory extension. *)
+    that does not extend the client's, a non-base64 salt, an iteration count
+    that is not positive or is over a million, or a mandatory extension. *)
 
 val verify : proven -> string -> (unit, string) result
 (** Checks the server-final-message proves the server knows the password. An

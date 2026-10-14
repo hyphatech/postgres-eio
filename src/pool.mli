@@ -17,13 +17,15 @@ type error =
     | `Closed  (** the pool is closed *) ] ]
 (** What a borrow meets in the pool, a state of the pool's own. *)
 
-val error_to_string : error -> string
-(** A sentence safe to log. *)
+val error_to_string : [< error | Connection.error ] -> string
+(** A sentence safe to log, for the pool's errors and its connections' alike, as
+    a borrow joins them: [Result.join (use pool f)] where [f] answers a
+    statement's result. *)
 
 val create :
   sw:Eio.Switch.t ->
   net:_ Eio.Net.t ->
-  clock:_ Eio.Time.Mono.t ->
+  mono_clock:_ Eio.Time.Mono.t ->
   ?parameters:(string * string) list ->
   ?timeout:Mtime.Span.t ->
   ?statement_cache:int ->
@@ -33,10 +35,10 @@ val create :
   ?max_lifetime:Mtime.Span.t ->
   ?idle_check:Mtime.Span.t ->
   Conninfo.t ->
-  (t, Connection.error) result
+  (t, [> Connection.error ]) result
 (** Opens [size] (8) connections, and at least one, as {!Postgres_eio.connect}
-    does, or returns the first error after closing those already open. [wait] (5
-    s) is the default borrow wait.
+    does, or returns the first error after closing those already open, as it
+    closes them when cancelled. [wait] (5 s) is the default borrow wait.
 
     On return, a reset is sent but not awaited: [DISCARD ALL] minus prepared
     statements and plans, which borrowers share
@@ -63,11 +65,11 @@ val use :
     waits.
 
     A connection whose reset failed or that was closed is reconnected on lend.
-    If that fails, a [warn] is logged and its first statement returns [Closed].
-    Unread pipelined answers are drained when the borrow ends. A row function
-    that raises while they are closes the connection, which still goes back and
-    is made again at the next lend, and its exception reaches the caller as it
-    was raised, unless [f] raised first.
+    If that fails, a [warn] is logged and its first statement answers
+    [`Connection `Closed]. Unread pipelined answers are drained when the borrow
+    ends. A row function that raises while they are closes the connection, which
+    still goes back and is made again at the next lend, and its exception
+    reaches the caller as it was raised, unless [f] raised first.
 
     The wait is cancellable, and so is [f]: an Eio cancellation stops [f] at
     whatever it is waiting on, the server or anything else, and propagates from

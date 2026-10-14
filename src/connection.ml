@@ -14,22 +14,47 @@ let src =
 module Log = (val Logs.src_log src : Logs.LOG)
 
 type error =
+  [ `Server of Server_error.t
+  | `Refused of string
+  | `Lost of string
+  | `Unsent of string
+  | `Connection of [ `Closed ] ]
+
+let error_to_string : [< error ] -> string = function
+  | `Server e -> Server_error.to_string e
+  | `Refused m | `Lost m | `Unsent m -> m
+  | `Connection `Closed -> "the connection is closed, and nothing was sent"
+
+(* What failed, as the driver acts on it: a timeout cancels the statement
+   at the server, a broken handshake lets [prefer] try without TLS, a
+   server's error keeps the link. The caller is told an [error]. *)
+type failure =
   | Server of Server_error.t
   | Refused of string
   | Timeout
-  | Closed
-  | Io of string
+  | Broken of string  (** the socket or TLS failed, or the peer closed it *)
   | Protocol of string
+  | Closed  (** the connection was closed before this was sent *)
 
-let error_to_string = function
-  | Server e -> Server_error.to_string e
-  | Refused m -> m
-  | Timeout -> "the server did not answer within the connection's timeout"
-  | Closed -> "the connection is closed"
-  | Io m -> m
-  | Protocol m -> "the server broke the protocol: " ^ m
+let error_of_failure = function
+  | Server e -> `Server e
+  | Refused m -> `Refused m
+  | Timeout -> `Lost "the server did not answer within the timeout"
+  | Broken m -> `Lost m
+  | Protocol m -> `Lost ("the server broke the protocol: " ^ m)
+  | Closed -> `Connection `Closed
 
-exception Fail of error
+(* Connecting does no work a caller asked for, so a connection that failed
+   to come up did nothing, and connecting again is safe. *)
+let connect_error_of_failure = function
+  | Timeout -> `Unsent "no server answered within the timeout"
+  | Broken m -> `Unsent m
+  | Protocol m -> `Unsent ("the server broke the protocol: " ^ m)
+  | (Server _ | Refused _ | Closed) as f -> error_of_failure f
+
+let failure_to_string f = error_to_string (error_of_failure f)
+
+exception Fail of failure
 
 let fail e = raise (Fail e)
 
@@ -41,7 +66,7 @@ type statement = { name : string; mutable prepared : prepared }
 and prepared =
   | Parsing  (** its Parse is sent and the answer not yet read *)
   | Described of Column.t array  (** parsed, and its result's columns known *)
-  | Unparsed of error  (** the server refused its Parse *)
+  | Unparsed of failure  (** the server refused its Parse *)
 
 (* Keyed by SQL text; past [capacity] the least recently used is closed. *)
 type cache = {
@@ -53,7 +78,7 @@ type cache = {
 
 (* An exchange awaiting its answer. [read] reads to its ReadyForQuery;
    [lost] reports the link failed first. *)
-type reply = { read : unit -> unit; lost : error -> unit }
+type reply = { read : unit -> unit; lost : failure -> unit }
 
 (* [flow] is [socket] or the TLS session over it. *)
 type link = {
@@ -76,6 +101,69 @@ type link = {
   mutable writing : bool;
 }
 
+let resolve net host ~port =
+  match Eio.Net.getaddrinfo_stream net host ~service:(string_of_int port) with
+  | addresses -> Ok addresses
+  | exception (Eio.Io _ as ex) -> Error (Printexc.to_string ex)
+
+(* One fiber on its switch's domain reads lookups from any domain, and runs
+   each in a daemon of its own, so a caller abandons its wait at its
+   deadline and the lookup ends in the background. Requests are added
+   under [lock] and the end of the stream after them, so every request the
+   fiber is given is answered before it stops. *)
+module Resolver = struct
+  type request = {
+    host : string;
+    port : int;
+    answer : (Eio.Net.Sockaddr.stream list, string) result Eio.Promise.u;
+  }
+
+  type t = {
+    requests : request option Eio.Stream.t;
+    lock : Mutex.t;
+    mutable closed : bool;
+  }
+
+  let create ~sw ~net =
+    let net = (net :> [ `Generic ] Eio.Net.ty Eio.Resource.t) in
+    let t =
+      {
+        requests = Eio.Stream.create max_int;
+        lock = Mutex.create ();
+        closed = false;
+      }
+    in
+    Eio.Fiber.fork_daemon ~sw (fun () ->
+        let rec serve () =
+          match Eio.Stream.take t.requests with
+          | None -> `Stop_daemon
+          | Some { host; port; answer } ->
+              Eio.Fiber.fork_daemon ~sw (fun () ->
+                  Eio.Promise.resolve answer (resolve net host ~port);
+                  `Stop_daemon);
+              serve ()
+        in
+        serve ());
+    t
+
+  (* [None] once closed. *)
+  let ask t host ~port =
+    Mutex.protect t.lock (fun () ->
+        if t.closed then None
+        else begin
+          let answer, resolved = Eio.Promise.create () in
+          Eio.Stream.add t.requests (Some { host; port; answer = resolved });
+          Some answer
+        end)
+
+  let close t =
+    Mutex.protect t.lock (fun () ->
+        if not t.closed then begin
+          t.closed <- true;
+          Eio.Stream.add t.requests None
+        end)
+end
+
 (* Where the link went, so a cancel request can reach the same server. *)
 type reached = {
   endpoint : C.endpoint;
@@ -85,6 +173,9 @@ type reached = {
 
 type t = {
   sw : Eio.Switch.t;
+  (* The domain that made the connection, whose switch [sw] is. *)
+  home : Domain.id;
+  resolver : Resolver.t option;
   net : [ `Generic ] Eio.Net.ty Eio.Resource.t;
   clock : Eio.Time.Mono.ty Eio.Resource.t;
   conninfo : C.t;
@@ -120,10 +211,12 @@ let bounded ~clock timeout f =
 let guard f =
   match f () with
   | v -> v
-  | exception End_of_file -> fail Closed
-  | exception (Eio.Io _ as ex) -> fail (Io (Printexc.to_string ex))
-  | exception (Tls_eio.Tls_alert _ as ex) -> fail (Io (Printexc.to_string ex))
-  | exception (Tls_eio.Tls_failure _ as ex) -> fail (Io (Printexc.to_string ex))
+  | exception End_of_file -> fail (Broken "the server closed the connection")
+  | exception (Eio.Io _ as ex) -> fail (Broken (Printexc.to_string ex))
+  | exception (Tls_eio.Tls_alert _ as ex) ->
+      fail (Broken (Printexc.to_string ex))
+  | exception (Tls_eio.Tls_failure _ as ex) ->
+      fail (Broken (Printexc.to_string ex))
 
 let encode m = match P.encode m with Ok s -> s | Error e -> fail (Refused e)
 let now t = Eio.Time.Mono.now t.clock
@@ -294,14 +387,14 @@ let tls_config (c : C.t) =
   in
   let authenticator =
     match c.ssl_mode with
-    | C.Disable | C.Allow | C.Prefer | C.Require ->
+    | None | Some (C.Disable | C.Allow | C.Prefer | C.Require) ->
         Ok (fun ?ip:_ ~host:_ _ -> Ok None)
-    | C.Verify_ca ->
+    | Some C.Verify_ca ->
         (* verify-ca: the chain only, not the name. *)
         Result.map
           (fun a ?ip:_ ~host:_ chain -> a ?ip:None ~host:None chain)
           (trusted ())
-    | C.Verify_full -> trusted ()
+    | Some C.Verify_full -> trusted ()
   in
   let certificates =
     match (c.ssl_cert, c.ssl_key) with
@@ -354,10 +447,10 @@ let identity (mode : C.ssl_mode) host =
 
 (* Returns the session and the server's certificate for channel binding.
    Direct TLS requires ALPN "postgresql", or any TLS server would do. *)
-let handshake t config (endpoint : C.endpoint) socket ~direct =
+let handshake config (endpoint : C.endpoint) socket ~direct =
   let host, ip =
     match endpoint.host with
-    | C.Tcp h -> identity t.conninfo.ssl_mode h
+    | C.Tcp h -> identity endpoint.ssl_mode h
     | C.Unix_socket _ -> (None, None)
   in
   let flow = guard (fun () -> Tls_eio.client_of_flow config ?host ?ip socket) in
@@ -388,15 +481,13 @@ type offer =
 (* 54.2.10: read exactly one byte before the handshake, so bytes injected
    after it reach TLS and are refused (CVE-2021-23222). An ErrorResponse
    here is unauthenticated, so its text is not shown. *)
-let negotiate t config endpoint (socket : socket) =
+let negotiate config endpoint (socket : socket) =
   guard (fun () -> Eio.Flow.copy_string (encode P.Ssl_request) socket);
   let one = Cstruct.create 1 in
   let n = guard (fun () -> Eio.Flow.single_read socket one) in
   match (n, Cstruct.get_char one 0) with
   | 1, 'S' ->
-      let flow, certificate =
-        handshake t config endpoint socket ~direct:false
-      in
+      let flow, certificate = handshake config endpoint socket ~direct:false in
       Encrypted (flow, certificate)
   | 1, 'N' -> Declined
   | 1, 'E' -> Errored
@@ -588,13 +679,71 @@ let rec ready t link =
   | P.Error_response f -> fail (Server (Server_error.of_fields f))
   | m -> out_of_turn "54.2.1 Start-up" m "before ReadyForQuery"
 
-(* The caller's parameters override the connection string's. *)
+(* The settings the text decoders read by ({!Text}, {!Value}), sent at
+   every start-up over a database's or a role's own: text in UTF-8, dates
+   as ISO 8601 writes them, intervals as [IntervalStyle=postgres] does, and
+   a float to the digits that read back as it. *)
+let decoded_by =
+  [
+    ("client_encoding", "UTF8");
+    ("DateStyle", "ISO");
+    ("IntervalStyle", "postgres");
+    ("extra_float_digits", "3");
+  ]
+
+(* A setting's name, and each of these values, reads alike in any case. *)
+let same a b =
+  String.equal (String.lowercase_ascii a) (String.lowercase_ascii b)
+
+(* Postgres names an encoding ignoring case and all but its letters and
+   digits, and reads Unicode as UTF8 (pg_char_to_encoding), so UTF-8 and
+   utf8 are one encoding. *)
+let encoding name =
+  let kept =
+    String.of_seq
+      (Seq.filter
+         (function 'a' .. 'z' | '0' .. '9' -> true | _ -> false)
+         (String.to_seq (String.lowercase_ascii name)))
+  in
+  if String.equal kept "unicode" then "utf8" else kept
+
+let reads_alike setting a b =
+  if same setting "client_encoding" then String.equal (encoding a) (encoding b)
+  else same a b
+
+(* The caller's value is not quoted: a driver error holds no setting's. *)
+let keep_the_decoders settings =
+  let changed (name, value) =
+    List.find_opt
+      (fun (ours, needed) ->
+        same name ours && not (reads_alike ours value needed))
+      decoded_by
+  in
+  match List.find_map changed settings with
+  | None -> ()
+  | Some (ours, needed) ->
+      fail
+        (Refused
+           (Printf.sprintf
+              "%s is given a value other than %s, which would have the driver \
+               misread what the server sends: it sets %s=%s on every \
+               connection itself, so leave the setting out"
+              ours needed ours needed))
+
+(* The caller's parameters override the connection string's, and the
+   decoders' settings are added where neither names them. *)
 let start t link endpoint =
   let c = t.conninfo in
   t.protocol_minor <- protocol_minor c.max_protocol_version;
-  let settings =
+  let given =
     List.filter (fun (k, _) -> not (List.mem_assoc k t.parameters)) c.options
     @ t.parameters
+  in
+  let settings =
+    List.filter
+      (fun (ours, _) -> not (List.exists (fun (k, _) -> same k ours) given))
+      decoded_by
+    @ given
   in
   send t link
     (P.Startup
@@ -612,6 +761,24 @@ let start t link endpoint =
 
 (* Hosts, addresses and sockets *)
 
+(* eio_posix looks a name up in a system thread no cancellation reaches, so
+   a deadline would wait for a slow resolver to finish. The lookup runs in a
+   daemon fiber, the resolver's or one on the connection's switch, which
+   outlives the wait: the deadline abandons the wait, and the lookup ends in
+   the background. Eio forks onto a switch only from its own domain, so
+   without a resolver, on another domain, the lookup is waited for where it
+   runs. *)
+let lookup t host ~port =
+  match Option.bind t.resolver (fun r -> Resolver.ask r host ~port) with
+  | Some answer -> Eio.Promise.await answer
+  | None when Int.equal (Domain.self () :> int) (t.home :> int) ->
+      let answer, resolved = Eio.Promise.create () in
+      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+          Eio.Promise.resolve resolved (resolve t.net host ~port);
+          `Stop_daemon);
+      Eio.Promise.await answer
+  | None -> resolve t.net host ~port
+
 let addresses t (endpoint : C.endpoint) =
   match (endpoint.host, endpoint.address) with
   | C.Unix_socket dir, _ ->
@@ -626,13 +793,10 @@ let addresses t (endpoint : C.endpoint) =
       in
       [ `Tcp (Eio.Net.Ipaddr.of_raw raw, endpoint.port) ]
   | C.Tcp host, None -> (
-      match
-        guard (fun () ->
-            Eio.Net.getaddrinfo_stream t.net host
-              ~service:(string_of_int endpoint.port))
-      with
-      | [] -> fail (Io (Printf.sprintf "no address for %s" host))
-      | addresses -> addresses)
+      match lookup t host ~port:endpoint.port with
+      | Error m -> fail (Broken m)
+      | Ok [] -> fail (Broken (Printf.sprintf "no address for %s" host))
+      | Ok addresses -> addresses)
 
 let close_quietly (socket : socket) =
   try Eio.Resource.close socket with Eio.Io _ -> ()
@@ -648,7 +812,7 @@ let keep_alive (socket : socket) =
         Eio_unix.Fd.use_exn "keepalive" fd (fun fd ->
             Unix.setsockopt fd Unix.SO_KEEPALIVE true)
       with Unix.Unix_error (e, _, _) ->
-        fail (Io ("TCP keepalive cannot be set: " ^ Unix.error_message e)))
+        fail (Broken ("TCP keepalive cannot be set: " ^ Unix.error_message e)))
 
 (* Not [Eio.Net.connect], which attaches the socket to the switch before
    connecting and leaks a descriptor per refused address until the switch
@@ -695,6 +859,16 @@ let open_socket t address =
 
 type tls = Plain | If_offered | Required
 
+let not_offered t =
+  match t.conninfo.ssl_mode with
+  | Some mode ->
+      Printf.sprintf "the server does not offer TLS, which sslmode=%s asks for"
+        (C.ssl_mode_to_string mode)
+  | None ->
+      "the server does not offer TLS, which a host on another machine needs \
+       unless the connection string says otherwise: sslmode=disable, or \
+       prefer, connects without it"
+
 (* [prefer] retries without TLS when the server refused TLS, the handshake
    failed, or sign-in failed inside it, as libpq does. *)
 exception Again_without_tls
@@ -716,23 +890,17 @@ let attempt t endpoint address ~tls =
           match t.conninfo.ssl_negotiation with
           | C.Direct ->
               let flow, certificate =
-                handshake t config endpoint socket ~direct:true
+                handshake config endpoint socket ~direct:true
               in
               (flow, true, certificate)
           | C.Postgres -> (
-              match negotiate t config endpoint socket with
+              match negotiate config endpoint socket with
               | Encrypted (flow, certificate) -> (flow, true, certificate)
-              | exception Fail (Io _ as e) -> without_tls_if_preferred e
+              | exception Fail (Broken _ as e) -> without_tls_if_preferred e
               | Declined -> (
                   match tls with
                   | If_offered -> (socket, false, None)
-                  | Plain | Required ->
-                      fail
-                        (Refused
-                           (Printf.sprintf
-                              "the server does not offer TLS, which sslmode=%s \
-                               asks for"
-                              (C.ssl_mode_to_string t.conninfo.ssl_mode))))
+                  | Plain | Required -> fail (Refused (not_offered t)))
               | Errored ->
                   without_tls_if_preferred
                     (Refused
@@ -776,8 +944,8 @@ let attempt t endpoint address ~tls =
       close_quietly socket;
       raise ex
 
-let connect_address t endpoint address =
-  match t.conninfo.ssl_mode with
+let connect_address t (endpoint : C.endpoint) address =
+  match endpoint.ssl_mode with
   | C.Disable -> attempt t endpoint address ~tls:Plain
   | C.Allow -> (
       match attempt t endpoint address ~tls:Plain with
@@ -875,7 +1043,7 @@ let establish t =
           | exception Fail e ->
               Log.debug (fun m ->
                   m "no connection at %a: %s" Eio.Net.Sockaddr.pp address
-                    (error_to_string e));
+                    (failure_to_string e));
               each endpoint rest (Some e) more
           | link -> (
               match suits t wanted with
@@ -906,10 +1074,10 @@ let establish t =
             (if link.secure then " over TLS" else ""));
       link
   | Error last ->
-      fail (Option.value last ~default:(Io "no address to connect to"))
+      fail (Option.value last ~default:(Broken "no address to connect to"))
 
-let open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache ~heard
-    conninfo =
+let open_connection ~sw ~net ~clock ~resolver ~parameters ~timeout
+    ~statement_cache ~heard conninfo =
   (* TLS and the SCRAM nonce fail at runtime without a seeded RNG. One the
      application set is its choice, and stays. *)
   (match Mirage_crypto_rng.default_generator () with
@@ -917,16 +1085,20 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache ~heard
   | exception Mirage_crypto_rng.No_default_generator ->
       Mirage_crypto_rng_unix.use_default ());
   match
-    match (conninfo : C.t).ssl_mode with
-    | C.Disable -> None
-    | C.Allow | C.Prefer | C.Require | C.Verify_ca | C.Verify_full ->
+    keep_the_decoders ((conninfo : C.t).options @ parameters);
+    match conninfo.ssl_mode with
+    | Some C.Disable -> None
+    | None | Some (C.Allow | C.Prefer | C.Require | C.Verify_ca | C.Verify_full)
+      ->
         Some (tls_config conninfo)
   with
-  | exception Fail e -> Error e
+  | exception Fail f -> Error (connect_error_of_failure f)
   | tls -> (
       let t =
         {
           sw;
+          home = Domain.self ();
+          resolver;
           net :> [ `Generic ] Eio.Net.ty Eio.Resource.t;
           clock :> Eio.Time.Mono.ty Eio.Resource.t;
           conninfo;
@@ -948,22 +1120,24 @@ let open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache ~heard
       | link ->
           t.link <- Some link;
           Ok t
-      | exception Fail e -> Error e)
+      | exception Fail f -> Error (connect_error_of_failure f))
 
-let connect ~sw ~net ~clock ?(parameters = []) ?(timeout = Mtime.Span.(30 * s))
-    ?(statement_cache = 256) conninfo =
-  open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache
-    ~heard:None conninfo
+let connect ~sw ~net ~mono_clock ?resolver ?(parameters = [])
+    ?(timeout = Mtime.Span.(30 * s)) ?(statement_cache = 256) conninfo =
+  open_connection ~sw ~net ~clock:mono_clock ~resolver ~parameters ~timeout
+    ~statement_cache ~heard:None conninfo
 
 (* Cancelling *)
 
 (* 54.2.8: a separate connection to the same server. Waits for the server
    to close it, so the request was read when this returns, or until
-   [within] passes. Safe to call from another fiber. *)
+   [within] passes. Safe to call from another fiber. A failure before the
+   request was written did nothing. *)
 let send_cancel t ~within =
   match t.reached with
   | None -> Ok ()
   | Some { endpoint; address; secure } -> (
+      let sent = ref false in
       match
         Eio.Switch.run (fun sw ->
             bounded ~clock:t.clock within (fun () ->
@@ -977,17 +1151,18 @@ let send_cancel t ~within =
                   | true, Some config -> (
                       match t.conninfo.ssl_negotiation with
                       | C.Direct ->
-                          fst (handshake t config endpoint socket ~direct:true)
+                          fst (handshake config endpoint socket ~direct:true)
                       | C.Postgres -> (
-                          match negotiate t config endpoint socket with
+                          match negotiate config endpoint socket with
                           | Encrypted (flow, _) -> flow
                           | Declined | Errored ->
                               fail (Refused "the server no longer offers TLS")))
                 in
-                guard (fun () ->
-                    Eio.Flow.copy_string
-                      (encode (P.Cancel_request { pid = t.pid; key = t.key }))
-                      flow);
+                let request =
+                  encode (P.Cancel_request { pid = t.pid; key = t.key })
+                in
+                sent := true;
+                guard (fun () -> Eio.Flow.copy_string request flow);
                 let buf = Cstruct.create 64 in
                 let rec until_closed () =
                   match Eio.Flow.single_read flow buf with
@@ -997,12 +1172,15 @@ let send_cancel t ~within =
                 guard until_closed))
       with
       | () -> Ok ()
-      | exception Fail e -> Error e)
+      | exception Fail f ->
+          Error
+            (if !sent then error_of_failure f else connect_error_of_failure f))
 
 let cancel t = send_cancel t ~within:t.timeout
 
 (* The answer queue *)
 
+(* What was sent is lost for [e]; what was only queued was never sent. *)
 let break t e =
   match t.link with
   | None -> ()
@@ -1010,12 +1188,12 @@ let break t e =
       t.link <- None;
       close_quietly link.socket;
       Buffer.reset link.out;
-      let lose q =
+      let lose q e =
         Queue.iter (fun r -> r.lost e) q;
         Queue.clear q
       in
-      lose link.sent;
-      lose link.unsent
+      lose link.sent e;
+      lose link.unsent Closed
 
 (* A cancel request is a connect, perhaps a TLS handshake, and one small
    message on a server that answers within milliseconds; 5 s is far past
@@ -1043,23 +1221,30 @@ let stop t e =
   Eio.Cancel.protect (fun () ->
       ignore (cancel_given_up t : (unit, error) result))
 
+(* Closing, or an exception from the caller's callback, leaves what was
+   sent with no answer anybody reads. *)
+let unread = Broken "the connection was closed with the answer unread"
+
 let run t f =
-  match t.link with
-  | None -> Error Closed
-  | Some link -> (
-      match exchange t link (fun () -> f link) with
-      | answer -> answer
-      | exception Fail (Refused _ as e) -> Error e
-      | exception Fail Timeout ->
-          stop t Timeout;
-          Error Timeout
-      | exception Fail e ->
-          break t e;
-          Error e
-      | exception ex ->
-          let bt = Printexc.get_raw_backtrace () in
-          stop t Closed;
-          Printexc.raise_with_backtrace ex bt)
+  let answer =
+    match t.link with
+    | None -> Error Closed
+    | Some link -> (
+        match exchange t link (fun () -> f link) with
+        | answer -> answer
+        | exception Fail (Refused _ as e) -> Error e
+        | exception Fail Timeout ->
+            stop t Timeout;
+            Error Timeout
+        | exception Fail e ->
+            break t e;
+            Error e
+        | exception ex ->
+            let bt = Printexc.get_raw_backtrace () in
+            stop t unread;
+            Printexc.raise_with_backtrace ex bt)
+  in
+  Result.map_error error_of_failure answer
 
 let enqueue link bytes reply =
   Buffer.add_string link.out bytes;
@@ -1218,7 +1403,7 @@ let stale = function
       String.equal (Server_error.sqlstate e) "0A000"
       && Option.equal String.equal (Server_error.field e 'R')
            (Some "RevalidateCachedQuery")
-  | Refused _ | Timeout | Closed | Io _ | Protocol _ -> false
+  | Refused _ | Timeout | Broken _ | Protocol _ | Closed -> false
 
 type use =
   | Unnamed  (** the cache is off: the unnamed statement, parsed each time *)
@@ -1599,7 +1784,7 @@ module Pipeline = struct
   type 'a answer = {
     conn : conn;
     mutable reply : reply option;
-    mutable result : ('a, error) result option;
+    mutable result : ('a, failure) result option;
   }
 
   let queued conn sql ~params ~columns ~init ~row ~finish =
@@ -1633,7 +1818,8 @@ module Pipeline = struct
                Ok ())
             : (unit, error) result)
     | (Some _ | None), _ -> ());
-    match a.result with Some r -> r | None -> Error Closed
+    Result.map_error error_of_failure
+      (match a.result with Some r -> r | None -> Error Closed)
 
   (* Also catches a session the server ended while nobody was reading. *)
   let drain conn =
@@ -1788,7 +1974,7 @@ let copy_in t sql source =
 let identifier what name =
   if String.contains name '\000' then
     Error
-      (Refused
+      (`Refused
          (Printf.sprintf "%s holds a NUL byte, which no identifier can" what))
   else Ok ("\"" ^ String.concat "\"\"" (String.split_on_char '"' name) ^ "\"")
 
@@ -1977,7 +2163,7 @@ let copy_out_rows t ~select ~init ~row =
   | Ok _ when Buffer.length held > 0 ->
       let e = Protocol "54.2.6 COPY Operations: the data ended inside a row" in
       break t e;
-      Error e
+      Error (error_of_failure e)
   | answer -> answer
 
 (* Lifecycle *)
@@ -2006,17 +2192,17 @@ let close t =
              guard (fun () ->
                  Eio.Flow.copy_string (encode P.Terminate) link.flow))
        with Fail _ -> ());
-      break t Closed
+      break t unread
 
 (* Same target, credentials and parameters; the statement cache starts
    empty. *)
-let reset t =
+let revive t =
   close t;
   match establish t with
   | link ->
       t.link <- Some link;
       Ok ()
-  | exception Fail e -> Error e
+  | exception Fail f -> Error (connect_error_of_failure f)
 
 (* LISTEN/NOTIFY *)
 
@@ -2026,7 +2212,7 @@ let payload_limit = 8000
 let notify t ~channel payload =
   if String.length payload >= payload_limit then
     Error
-      (Refused
+      (`Refused
          (Printf.sprintf
             "a notification's payload of %d bytes, where Postgres takes fewer \
              than %d"
@@ -2043,7 +2229,7 @@ let notify t ~channel payload =
    timeout. Without a descriptor, a plain socket is read under the bound;
    a TLS one waits unbounded. Bytes already read are parsed first: a
    notification read with the last reply is in them, and the socket may
-   stay silent until the next heartbeat.
+   stay silent until the next keep-alive.
 
    Readiness is awaited outside the exchange, since it reads nothing: a
    cancellation there keeps the connection, and the usual loop races this
@@ -2111,9 +2297,9 @@ module Listener = struct
   type t = {
     conn : conn;
     heard : notification Queue.t;
-    heartbeat : Mtime.Span.t;
+    keep_alive : Mtime.Span.t;
     (* When the listener last heard the server, or last proved it alive: the
-       heartbeat counts from it across calls, since a loop racing [next]
+       keep-alive counts from it across calls, since a loop racing [next]
        against a shorter tick would otherwise never send one. *)
     mutable heard_at : Mtime.t;
     (* For re-listening after reconnect. *)
@@ -2123,8 +2309,8 @@ module Listener = struct
 
   let ( let* ) = Result.bind
 
-  let connect ~sw ~net ~clock ?(parameters = [])
-      ?(timeout = Mtime.Span.(30 * s)) ?(heartbeat = Mtime.Span.(10 * s))
+  let connect ~sw ~net ~mono_clock ?resolver ?(parameters = [])
+      ?(timeout = Mtime.Span.(30 * s)) ?(keep_alive = Mtime.Span.(10 * s))
       conninfo =
     let heard = Queue.create () in
     Result.map
@@ -2132,13 +2318,13 @@ module Listener = struct
         {
           conn;
           heard;
-          heartbeat;
+          keep_alive;
           heard_at = now conn;
           channels = [];
           stopped = false;
         })
-      (open_connection ~sw ~net ~clock ~parameters ~timeout ~statement_cache:0
-         ~heard:(Some heard) conninfo)
+      (open_connection ~sw ~net ~clock:mono_clock ~resolver ~parameters ~timeout
+         ~statement_cache:0 ~heard:(Some heard) conninfo)
 
   (* Quoted, so the name is case-sensitive. *)
   let command verb channel =
@@ -2166,14 +2352,14 @@ module Listener = struct
   let first_retry = Mtime.Span.s
   let last_retry = Mtime.Span.(30 * s)
 
-  let transient = function
-    | Timeout | Closed | Io _ | Protocol _ -> true
-    | Server e -> String.starts_with ~prefix:"57P" (Server_error.sqlstate e)
-    | Refused _ -> false
+  let transient : error -> bool = function
+    | `Lost _ | `Unsent _ | `Connection `Closed -> true
+    | `Server e -> String.starts_with ~prefix:"57P" (Server_error.sqlstate e)
+    | `Refused _ -> false
 
   let reconnect t =
     let again () =
-      let* () = reset t.conn in
+      let* () = revive t.conn in
       List.fold_left
         (fun acc channel ->
           let* () = acc in
@@ -2205,12 +2391,12 @@ module Listener = struct
           (error_to_string e));
     reconnect t
 
-  (* Buffered notifications first; after a silent heartbeat, an empty query
+  (* Buffered notifications first; after a silent keep-alive span, an empty query
      proves the server is alive. The query is shielded, bounded by the
      timeout: a tick that cut it short would close the connection, and a
-     loop racing [next] would reconnect at every heartbeat. *)
+     loop racing [next] would reconnect at every keep-alive. *)
   let rec next t =
-    if t.stopped then Error Closed
+    if t.stopped then Error (`Connection `Closed)
     else
       match Queue.take_opt t.heard with
       | Some n -> Ok (Notification n)
@@ -2218,7 +2404,7 @@ module Listener = struct
       | None -> (
           let due =
             Option.value
-              (Mtime.add_span t.heard_at t.heartbeat)
+              (Mtime.add_span t.heard_at t.keep_alive)
               ~default:Mtime.max_stamp
           in
           match heard_within t.conn ~within:(until ~now:(now t.conn) due) with

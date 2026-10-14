@@ -1,5 +1,64 @@
 # Changes
 
+## Unreleased
+
+- Breaking: the words are the stack's own. `connect`'s, `Listener.connect`'s
+  and `Pool.create`'s `~clock` is `~mono_clock`, `Listener.connect`'s
+  `?heartbeat` is `?keep_alive`, and `reset`, which reconnects, is
+  `revive`; `Pool.create`'s `?reset`, which cleans a session, keeps its
+  name.
+- Breaking: `Postgres_eio.error` is a polymorphic variant, as
+  `Pool.use`'s errors already were, and every function that fails
+  answers `[> error]`, so a connection's failures and a pool's join in
+  one result. `Timeout`, `Io` and `Protocol` are one tag, `` `Lost ``:
+  the statement was sent and no answer came back, so it may have run.
+  `Closed` is `` `Connection `Closed `` and now means the statement was
+  never sent: an answer a `close` or a failure leaves unread is
+  `` `Lost ``. A connection that cannot be made, by `connect`, `revive`,
+  `Listener.connect` or `Pool.create`, answers `` `Unsent `` for what was
+  `Timeout`, `Io` or `Protocol`, since nothing was done. `Server` and
+  `Refused` are `` `Server `` and `` `Refused ``. `Pool.error_to_string`
+  prints a connection's errors as well as the pool's.
+- A SCRAM sign-in whose server asks for more than a million iterations is
+  refused before the first. The count was unbounded, and computing it
+  never yields, so a server asking for a hundred million held the
+  connect, its timeout and every fiber on its domain for over a minute.
+- A `Pool.create` cancelled partway closes the connections it had made.
+  They were left open, sessions held at the server, until their switch
+  ended.
+- `connect_timeout` bounds a host's name lookup. eio_posix looks a name
+  up in a system thread no cancellation reaches, so a slow resolver held
+  `connect` for as long as it took; the lookup now runs beside the wait,
+  on the connection's switch, and is left to finish there. A
+  `Postgres_eio.Resolver`, which `connect` and `Listener.connect` take as
+  `?resolver`, does lookups on its own fiber for a connection revived on
+  any domain, since Eio forks onto a switch only from its own; a pool
+  keeps one for its connections, so a borrower's revive is bounded on
+  every domain.
+- Breaking: every connection, a `Listener`'s too, sets the settings the
+  decoders read text by -- `client_encoding=UTF8`, `DateStyle=ISO`,
+  `IntervalStyle=postgres` and `extra_float_digits=3` -- over a
+  database's and a role's defaults. Nothing set `client_encoding`, so in a
+  `LATIN1` database UTF-8 text was stored as mojibake, and with
+  `extra_float_digits=0` a float read back rounded. A parameter or an
+  `options` setting giving one of them another value is `` `Refused ``;
+  `client_encoding` is compared by encoding, so `UTF-8` or `Unicode` is
+  `UTF8`.
+- Breaking: with no `sslmode`, a host on another machine needs TLS, and
+  only a host on this one -- `localhost`, 127.0.0.0/8, `::1` or a Unix
+  socket, judged by `hostaddr` when given -- is `prefer`. Every host was
+  `prefer`, so a server that declined TLS, or a network that stripped
+  it, had the password and every query sent in the clear. A server that
+  offers no TLS is refused with an error naming `sslmode=disable` and
+  `prefer`. `sslnegotiation=direct` with no `sslmode` needs TLS of every
+  host. `Conninfo.t`'s `ssl_mode` is an option, `None` when the string
+  gives none, and each `Conninfo.endpoint` has the `ssl_mode` it is
+  reached with.
+- Breaking: `sslrootcert` is refused unless `sslmode` is `verify-full` or
+  `verify-ca`, the only modes that read it: with any other, or none, the
+  file was silently ignored and no certificate checked. Write
+  `sslmode=verify-full`, or `verify-ca`, to check against it.
+
 ## 0.4.0 (2026-10-13)
 
 - Breaking: `Conninfo.t`, `Conninfo.endpoint` and `Conninfo.auth_methods`

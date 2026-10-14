@@ -10,9 +10,10 @@ module Log = (val Logs.src_log src : Logs.LOG)
 
 type error = [ `Pool of [ `Busy | `Closed ] ]
 
-let error_to_string : error -> string = function
+let error_to_string : [< error | C.error ] -> string = function
   | `Pool `Busy -> "no connection came free within the pool's wait"
   | `Pool `Closed -> "the pool is closed"
+  | #C.error as e -> C.error_to_string e
 
 (* Only the holder of an entry (a borrower or the housekeeping) touches it,
    so no lock is needed. *)
@@ -35,6 +36,8 @@ type t = {
   wait : Mtime.Span.t;
   clock : Eio.Time.Mono.ty Eio.Resource.t;
   connect : unit -> (C.t, C.error) result;
+  (* Its connections' lookups, bounded on every borrower's domain. *)
+  resolver : C.Resolver.t;
   timeout : Mtime.Span.t option;
   reset : bool;
   lifetime : Mtime.Span.t;
@@ -112,7 +115,7 @@ let back t e =
 
 let made_again what e =
   Log.info (fun m -> m "%s, and is made again" what);
-  match C.reset e.conn with
+  match C.revive e.conn with
   | Ok () -> ()
   | Error err ->
       Log.warn (fun m ->
@@ -121,7 +124,7 @@ let made_again what e =
 (* Reads the queued reset; a failed reset or dead connection is replaced
    here, inside the borrow, so a cancelled borrower still returns it. If
    reconnecting fails the reason is logged, as the borrower will only see
-   [Closed]. *)
+   [`Connection `Closed]. *)
 let ready e =
   ignore (C.Pipeline.drain e.conn : (unit, C.error) result);
   let failed =
@@ -248,13 +251,17 @@ let housekeeping t ~every =
   in
   loop ()
 
-let create ~sw ~net ~clock ?parameters ?timeout ?statement_cache ?(size = 8)
-    ?(wait = Mtime.Span.(5 * s)) ?(reset = true)
+let create ~sw ~net ~mono_clock:clock ?parameters ?timeout ?statement_cache
+    ?(size = 8) ?(wait = Mtime.Span.(5 * s)) ?(reset = true)
     ?(max_lifetime = Mtime.Span.(30 * min)) ?(idle_check = Mtime.Span.(60 * s))
     conninfo =
+  let resolver = C.Resolver.create ~sw ~net in
   let connect () =
-    C.connect ~sw ~net ~clock ?parameters ?timeout ?statement_cache conninfo
+    C.connect ~sw ~net ~mono_clock:clock ~resolver ?parameters ?timeout
+      ?statement_cache conninfo
   in
+  (* What was made is closed on a failure, and on a cancellation too,
+     shielded so its Terminate is still sent. *)
   let rec go n acc =
     if n <= 0 then Ok acc
     else
@@ -262,7 +269,13 @@ let create ~sw ~net ~clock ?parameters ?timeout ?statement_cache ?(size = 8)
       | Ok c -> go (n - 1) (c :: acc)
       | Error e ->
           List.iter C.close acc;
-          Error e
+          C.Resolver.close resolver;
+          Error (e : C.error :> [> C.error ])
+      | exception ex ->
+          let bt = Printexc.get_raw_backtrace () in
+          Eio.Cancel.protect (fun () -> List.iter C.close acc);
+          C.Resolver.close resolver;
+          Printexc.raise_with_backtrace ex bt
   in
   Result.map
     (fun all ->
@@ -277,6 +290,7 @@ let create ~sw ~net ~clock ?parameters ?timeout ?statement_cache ?(size = 8)
           wait;
           clock :> Eio.Time.Mono.ty Eio.Resource.t;
           connect;
+          resolver;
           timeout = (match all with c :: _ -> C.timeout c | [] -> None);
           reset;
           lifetime = max_lifetime;
@@ -382,6 +396,7 @@ let use ?wait t f =
    transaction. *)
 let close t =
   ignore (Eio.Promise.try_resolve t.close_now () : bool);
+  C.Resolver.close t.resolver;
   let rec idle () =
     match Eio.Stream.take_nonblocking t.free with
     | Some e ->

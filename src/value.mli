@@ -4,10 +4,11 @@
     text as in binary. Binary forms are Postgres's send functions, unchanged
     since Postgres 10 for these types.
 
-    Text [float4] is rounded to single precision so it matches binary, given
-    [extra_float_digits >= 1] (the default since Postgres 12). Text dates and
-    times are read in [DateStyle=ISO]. An instant within a day of year 1 or
-    10000 may print, in a distant time zone, as a year no decoder reads.
+    Text is read in the settings every connection sets: [client_encoding=UTF8],
+    [DateStyle=ISO], [IntervalStyle=postgres] and [extra_float_digits=3], so a
+    float reads back to its last digit. Text [float4] is rounded to single
+    precision so it matches binary. An instant within a day of year 1 or 10000
+    may print, in a distant time zone, as a year no decoder reads.
 
     A type with no reader here -- [numeric], [time], a range, [inet] -- is
     always sent as text, since {!binary} asks for no other. {!text} hands it
@@ -52,7 +53,7 @@ val timestamptz : Column.t -> string -> Ptime.t option
 (** The instant, to the microsecond, whatever the session's time zone. *)
 
 val interval : Column.t -> string -> Interval.t option
-(** Its binary form, or its text in [IntervalStyle=postgres], the default. *)
+(** Its binary form, or its text in [IntervalStyle=postgres]. *)
 
 val json : Column.t -> string -> string option
 (** [json] and [jsonb]'s text; binary [jsonb] is a version byte before it. *)

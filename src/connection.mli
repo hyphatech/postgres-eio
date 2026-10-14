@@ -21,50 +21,94 @@ type t
 
     @canonical Postgres_eio.t *)
 
-(** Why an exchange failed.
+type error =
+  [ `Server of Server_error.t  (** the server refused, and said why *)
+  | `Refused of string
+    (** refused by the driver, before anything was sent or after a statement
+        that was not what was asked (a COPY to {!query}): an unsafe sign-in, an
+        untrusted certificate, a value it cannot send, a setting the decoders
+        cannot read by *)
+  | `Lost of string
+    (** sent, and no answer came back -- the timeout passed, the socket or TLS
+        failed, the server broke the protocol or closed the connection -- and
+        the connection is closed. What the statement did is unknown: a write may
+        have been applied, so it is not run again blindly. On a timeout or a
+        cancellation the running statement is first cancelled at the server, as
+        {!cancel} does, the request given 5 s or the timeout, whichever is
+        shorter. *)
+  | `Unsent of string
+    (** connecting failed -- no address answered, the socket or TLS failed, the
+        server broke the protocol -- before any statement went out, so nothing
+        was done and connecting again is safe *)
+  | `Connection of
+    [ `Closed
+      (** the connection was closed, by {!close} or a failure, before this was
+          sent, so nothing was sent *) ] ]
+(** Why an exchange failed: a polymorphic variant, so a connection's failures
+    join a pool's and the caller's own in one result. Every function that fails
+    answers [[> error]].
 
     @canonical Postgres_eio.error *)
-type error =
-  | Server of Server_error.t  (** the server refused, and said why *)
-  | Refused of string
-      (** refused by the driver: an unsafe sign-in, an untrusted certificate, a
-          value it cannot send *)
-  | Timeout
-      (** the connection's timeout passed; the connection is closed, and its
-          running statement cancelled at the server, as {!cancel} does, the
-          request given 5 s or the timeout, whichever is shorter *)
-  | Closed  (** the connection is closed, or the server closed it *)
-  | Io of string  (** the socket or TLS failed; the connection is closed *)
-  | Protocol of string
-      (** the server broke the protocol (the section is named); the connection
-          is closed *)
 
-val error_to_string : error -> string
+val error_to_string : [< error ] -> string
 (** A sentence safe to log. *)
+
+(** Looks host names up for connections on any domain.
+
+    A lookup cannot be cancelled: eio_posix runs it in a system thread. So it
+    runs in a fiber of its own, and a connection waits for its answer only until
+    its deadline, leaving a slow lookup to end in the background. A connection
+    forks that fiber on its switch, which Eio allows only on the switch's
+    domain; given a resolver, a connection revived on any domain asks it
+    instead, and is bounded there too. A pool gives its connections one. *)
+module Resolver : sig
+  type t
+
+  val create : sw:Eio.Switch.t -> net:_ Eio.Net.t -> t
+  (** A resolver whose fiber runs on [sw], on the calling domain, until {!close}
+      or the end of [sw]. *)
+
+  val close : t -> unit
+  (** Ends its fiber once the lookups asked of it are under way. A connection
+      given it then looks names up as one given none. Idempotent. *)
+end
 
 val connect :
   sw:Eio.Switch.t ->
   net:_ Eio.Net.t ->
-  clock:_ Eio.Time.Mono.t ->
+  mono_clock:_ Eio.Time.Mono.t ->
+  ?resolver:Resolver.t ->
   ?parameters:(string * string) list ->
   ?timeout:Mtime.Span.t ->
   ?statement_cache:int ->
   Conninfo.t ->
-  (t, error) result
+  (t, [> error ]) result
 (** Connects, negotiates TLS per [sslmode], signs in and starts up. The socket,
-    and any {!reset} opens, live on [sw].
+    and any {!revive} opens, live on [sw], which is the calling domain's, as Eio
+    asks of a switch.
 
     [parameters] are startup parameters, e.g. [("statement_timeout", "10s")],
-    re-sent on every {!reset}, so they last for the connection's life.
+    re-sent on every {!revive}, so they last for the connection's life. Every
+    connection also sets the settings {!Text} and {!Value} read text by, over
+    the database's and the role's defaults: [client_encoding=UTF8],
+    [DateStyle=ISO], [IntervalStyle=postgres] and [extra_float_digits=3]. A
+    parameter, or an [options] setting, giving one of them another value is
+    [`Refused], since every cell would be misread. A [client_encoding] is
+    compared by the encoding it names, as Postgres reads it: [UTF-8], [utf8] and
+    [Unicode] are [UTF8]. The others are compared ignoring case.
 
     [timeout] (30 s) is the longest the connection waits on the server for bytes
     to move, in either direction; the caller's row function is not timed.
-    Connecting uses [connect_timeout] if not zero, else [timeout]. Bound
-    statement runtime with [statement_timeout]; for statements that wait longer
-    than [timeout], raise it with {!set_timeout}.
+    Connecting uses [connect_timeout] if not zero, else [timeout], for each
+    host's name lookup and each address. A lookup past it is given up and left
+    to finish in the background, on [resolver]'s fiber or on [sw]; without a
+    [resolver], a {!revive} on a domain other than [sw]'s cannot leave it on
+    [sw], and waits for it. Bound statement runtime with [statement_timeout];
+    for statements that wait longer than [timeout], raise it with
+    {!set_timeout}.
 
     [statement_cache] (256) is how many statements stay parsed, LRU by SQL text,
-    emptied by {!reset}. [0] disables it, for poolers without named statements
+    emptied by {!revive}. [0] disables it, for poolers without named statements
     (pgbouncer before 1.21 in transaction mode).
 
     TLS and SCRAM draw from mirage-crypto's default random generator: one the
@@ -90,7 +134,7 @@ val query :
   params:string option list ->
   init:'a ->
   row:('a -> string option array -> 'a) ->
-  ('a * Tag.t, error) result
+  ('a * Tag.t, [> error ]) result
 (** Runs one statement by the extended protocol. [params] bind [$1], [$2], ...
     as text, [None] for NULL. [columns] is called once before any row, even with
     no rows. [row] folds each row as it arrives ([None] is NULL); rows are not
@@ -102,17 +146,21 @@ val query :
     costing one extra round trip on a statement's first run, and is refused when
     the cache is off. *)
 
-val execute : t -> string -> params:string option list -> (Tag.t, error) result
+val execute :
+  t -> string -> params:string option list -> (Tag.t, [> error ]) result
 (** Runs one statement for its effect, as {!query} does, and returns its tag:
     [execute conn "insert into t values ($1)" ~params:[ Some "1" ]]. Returned
     rows are discarded. *)
 
 val execute_many :
-  t -> string -> params:string option list list -> (Tag.t list, error) result
+  t ->
+  string ->
+  params:string option list list ->
+  (Tag.t list, [> error ]) result
 (** Runs one statement per parameter list in one round trip and one implicit
     transaction: if any fails, none apply. Returned rows are discarded. *)
 
-val script : t -> string -> (unit, error) result
+val script : t -> string -> (unit, [> error ]) result
 (** Runs one or more parameterless statements by the simple protocol, discarding
     rows.
 
@@ -125,7 +173,7 @@ type description = {
   columns : Column.t array;  (** empty for a statement returning no rows *)
 }
 
-val describe : t -> string -> (description, error) result
+val describe : t -> string -> (description, [> error ]) result
 (** Parameter types and result columns without running the statement. Uses the
     unnamed statement, leaving the cache untouched. *)
 
@@ -154,16 +202,16 @@ module Pipeline : sig
   val execute : conn -> string -> params:string option list -> Tag.t answer
   (** Queues a statement for its effect, as {!Postgres_eio.execute}. *)
 
-  val get : 'a answer -> ('a, error) result
+  val get : 'a answer -> ('a, [> error ]) result
   (** Sends everything queued and reads answers up to this one. *)
 
-  val drain : conn -> (unit, error) result
+  val drain : conn -> (unit, [> error ]) result
   (** Sends everything and reads every outstanding answer, so
       {!Postgres_eio.status} is current. Errors only if the connection failed
       (including a terminated backend); statement errors stay in their answers.
   *)
 
-  val flush : conn -> (unit, error) result
+  val flush : conn -> (unit, [> error ]) result
   (** Sends everything without reading; whoever reads next gets the answers.
       Only for a few statements: a pipeline long enough to fill the server's
       output buffer stalls until the timeout. {!get} and {!drain} read while
@@ -175,7 +223,7 @@ end
     Bulk data, streamed in both directions without buffering whole tables. COPY
     takes no parameters. *)
 
-val copy_in : t -> string -> _ Eio.Flow.source -> (Tag.t, error) result
+val copy_in : t -> string -> _ Eio.Flow.source -> (Tag.t, [> error ]) result
 (** Runs a [COPY ... FROM STDIN], streaming the source's bytes unchanged in the
     statement's format. Any other statement is refused, after it has run.
 
@@ -189,7 +237,7 @@ val copy_in_rows :
   table:string ->
   columns:string list ->
   string option array Seq.t ->
-  (Tag.t, error) result
+  (Tag.t, [> error ]) result
 (** Runs [COPY "schema"."table" ("a", "b") FROM STDIN] in text format, escaping
     each row. Cells follow [columns]' order ([None] is NULL); empty [columns]
     means all, in table order. The sequence is consumed lazily. Names are quoted
@@ -204,7 +252,7 @@ val copy_out :
   string ->
   init:'a ->
   chunk:('a -> string -> 'a) ->
-  ('a * Tag.t, error) result
+  ('a * Tag.t, [> error ]) result
 (** Runs a [COPY ... TO STDOUT], folding each CopyData into [chunk] as it
     arrives, in the statement's format. Any other statement is refused, after it
     has run. If [chunk] raises, the connection is closed, the statement
@@ -215,7 +263,7 @@ val copy_out_rows :
   select:string ->
   init:'a ->
   row:('a -> string option array -> 'a) ->
-  ('a * Tag.t, error) result
+  ('a * Tag.t, [> error ]) result
 (** Runs [COPY (select) TO STDOUT], decoding each text-format row for [row]
     ([None] is NULL). Like {!query}, for very large results. *)
 
@@ -232,18 +280,18 @@ val parameter : t -> string -> string option
 (** The latest value of a server-reported parameter, e.g. [server_version],
     [TimeZone], [DateStyle]. *)
 
-val cancel : t -> (unit, error) result
+val cancel : t -> (unit, [> error ]) result
 (** From another fiber, asks the server to cancel the running statement (over a
     separate connection). It fails with SQLSTATE 57014 and its transaction
     aborts. No effect if nothing is running. *)
 
-val reset : t -> (unit, error) result
+val revive : t -> (unit, [> error ]) result
 (** Closes the connection if open and reconnects with the same target,
     credentials and startup parameters. *)
 
 val closed : t -> bool
-(** Closed by {!close} or a failure; statements return [Closed] until {!reset}.
-*)
+(** Closed by {!close} or a failure; statements answer [`Connection `Closed]
+    until {!revive}. *)
 
 val statement_cache : t -> int
 (** The cache size it was made with; [0] means no [binary] results. *)
@@ -257,11 +305,12 @@ val set_timeout : t -> timeout:Mtime.Span.t option -> unit
 
 val close : t -> unit
 (** Sends Terminate and closes. Unsent statements are dropped and outstanding
-    answers become [Closed]. Idempotent. *)
+    answers are [`Lost] if their statement was sent and [`Connection `Closed] if
+    not. Idempotent. *)
 
 (** {1 LISTEN/NOTIFY} *)
 
-val notify : t -> channel:string -> string -> (unit, error) result
+val notify : t -> channel:string -> string -> (unit, [> error ]) result
 (** [select pg_notify(channel, payload)] on any connection. Delivered on commit,
     not on rollback. [channel] is case-sensitive. Payloads of 8000 bytes or more
     are refused before sending. *)
@@ -286,42 +335,43 @@ module Listener : sig
   val connect :
     sw:Eio.Switch.t ->
     net:_ Eio.Net.t ->
-    clock:_ Eio.Time.Mono.t ->
+    mono_clock:_ Eio.Time.Mono.t ->
+    ?resolver:Resolver.t ->
     ?parameters:(string * string) list ->
     ?timeout:Mtime.Span.t ->
-    ?heartbeat:Mtime.Span.t ->
+    ?keep_alive:Mtime.Span.t ->
     Conninfo.t ->
-    (t, error) result
-  (** Connects as {!Postgres_eio.connect}. [heartbeat] (10 s) is how long the
+    (t, [> error ]) result
+  (** Connects as {!Postgres_eio.connect}. [keep_alive] (10 s) is how long the
       listener goes without hearing from the server before pinging it, counted
       across calls to {!next}. *)
 
-  val listen : t -> string -> (unit, error) result
+  val listen : t -> string -> (unit, [> error ]) result
   (** [LISTEN], quoted: ["Jobs"] hears [pg_notify('Jobs', ...)], not an unquoted
       [NOTIFY Jobs], which Postgres folds to [jobs]. Notifications read
       meanwhile are kept for {!next}. *)
 
-  val unlisten : t -> string -> (unit, error) result
+  val unlisten : t -> string -> (unit, [> error ]) result
   (** [UNLISTEN]; the channel is not restored on reconnect. *)
 
-  val next : t -> (event, error) result
+  val next : t -> (event, [> error ]) result
   (** Waits for the next notification, in arrival order.
 
-      After a silent heartbeat it sends an empty query, so a dead server is
-      noticed within heartbeat + timeout; no background fiber is used. A failed
-      connection is reconnected, immediately then with backoff from 1 s to 30 s
-      (each failure a [warn]), and {!event.Reconnected} is returned. A server
-      error of class 57P, which a restarting server answers with ([57P03],
-      starting up), is retried as a failed connection is; any other server
-      refusal (sign-in, [LISTEN]) is returned as an error. After {!close},
-      [Closed].
+      After [keep_alive] in silence it sends an empty query, so a dead server is
+      noticed within [keep_alive] + [timeout]; no background fiber is used. A
+      failed connection is reconnected, immediately then with backoff from 1 s
+      to 30 s (each failure a [warn]), and {!event.Reconnected} is returned. A
+      server error of class 57P, which a restarting server answers with
+      ([57P03], starting up), is retried as a failed connection is; any other
+      server refusal (sign-in, [LISTEN]) is returned as an error. After
+      {!close}, [`Connection `Closed].
 
       [next] can be raced against a timer: an Eio cancellation while it waits
       keeps the connection and its channels, and what arrives meanwhile is kept
-      for the next call. A tick shorter than the heartbeat does not put it off,
-      and a heartbeat under way when the cancellation comes is finished first,
+      for the next call. A tick shorter than [keep_alive] does not put the ping
+      off, and a ping under way when the cancellation comes is finished first,
       within the timeout. *)
 
   val close : t -> unit
-  (** Closes it for good; {!next} then returns [Closed]. *)
+  (** Closes it for good; {!next} then answers [`Connection `Closed]. *)
 end

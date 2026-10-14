@@ -13,19 +13,35 @@
     No IO: {!environment} and {!passfile} take what they read from the caller.
 *)
 
+(** How a host is reached over TLS, as libpq means each.
+
+    With no [sslmode], a host on this machine -- [localhost], an address in
+    127.0.0.0/8, [::1], or a Unix socket -- is [Prefer], since its traffic never
+    leaves the machine, and any other host is [Require], so a connection that
+    crosses a network is encrypted unless the string says otherwise. With
+    [sslnegotiation=direct], every host is [Require]. The mode is decided per
+    host, by where the connection goes: [hostaddr] when given, else [host]. *)
 type ssl_mode =
   | Disable  (** never TLS *)
   | Allow  (** plain, and TLS only if the server refuses plain *)
-  | Prefer  (** TLS if it succeeds, else plain -- the default *)
-  | Require  (** TLS, its certificate not checked *)
-  | Verify_ca  (** TLS, certificate chain verified *)
-  | Verify_full  (** as [Verify_ca], and the host name verified *)
+  | Prefer
+      (** TLS if the server offers it and the handshake succeeds, else plain *)
+  | Require
+      (** encrypted, and the server's certificate not checked: safe from a
+          listener, not from a server that pretends *)
+  | Verify_ca
+      (** encrypted, and the certificate checked against [sslrootcert], or the
+          system's authorities when absent *)
+  | Verify_full
+      (** as [Verify_ca], and the certificate checked to name the host: the one
+          that proves the server is the one named, and the mode for production
+      *)
 
 type ssl_negotiation =
   | Postgres  (** SSLRequest first *)
   | Direct
       (** TLS from the first byte with ALPN [postgresql], saving a round trip;
-          requires [sslmode=require] or stronger *)
+          an [sslmode] given is [require] or stronger, and none is [require] *)
 
 type channel_binding =
   | Binding_disabled
@@ -69,6 +85,9 @@ type endpoint = private {
   port : int;  (** default 5432 *)
   password : string option;
       (** from {!passfile}, used when [password] is absent *)
+  ssl_mode : ssl_mode;
+      (** how this host is reached: the connection string's [sslmode], or the
+          default for where it is (see {!type-ssl_mode}) *)
 }
 
 type t = private {
@@ -77,9 +96,13 @@ type t = private {
   user : string;  (** required *)
   password : string option;
   database : string;  (** defaults to [user] *)
-  ssl_mode : ssl_mode;
+  ssl_mode : ssl_mode option;
+      (** [sslmode] as the string gives it; [None] where it gives none, and each
+          host's {!endpoint.ssl_mode} is the default for where it is *)
   ssl_root_cert : string option;
-      (** PEM CA file for verification; the system's when absent *)
+      (** PEM CA file for verification; the system's when absent. Only
+          [sslmode=verify-full] and [verify-ca] read it, so with any other mode,
+          or none, it is refused rather than ignored. *)
   ssl_cert : string option;  (** PEM client certificate chain *)
   ssl_key : string option;  (** PEM client key, unencrypted *)
   ssl_negotiation : ssl_negotiation;

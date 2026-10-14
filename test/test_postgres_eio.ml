@@ -556,6 +556,23 @@ let scram_refuses_a_server_it_cannot_trust () =
     "attributes out of order" true
     (refused "s=c2FsdA==,r=abcdef,i=4096")
 
+(* Hi never yields, so a count past what the driver computes would stall
+   the domain, every timeout with it. The bound is computed, one past it is
+   not. *)
+let scram_bounds_its_iterations () =
+  let answer iterations =
+    let scram, _ = Auth.client_first ~password:"p" ~nonce:"abc" () in
+    Auth.client_final scram
+      (Printf.sprintf "r=abcdef,s=c2FsdA==,i=%d" iterations)
+  in
+  Alcotest.(check bool)
+    "RFC 5802 §5.1 the bound itself" true
+    (Result.is_ok (answer 1_000_000));
+  match answer 1_000_001 with
+  | Error m ->
+      Alcotest.(check bool) ("one past it: " ^ m) true (contains m "1000000")
+  | Ok _ -> Alcotest.fail "one past the bound was computed"
+
 let md5 () =
   Alcotest.(check string)
     "54.3: md5 of the md5 of the password and the user, and the salt"
@@ -597,12 +614,13 @@ let set (c : Conninfo.t) pairs =
 (* Every field; multi-host and sign-in fields only when not default. *)
 let show_conninfo (t : Conninfo.t) =
   let endpoint (e : Conninfo.endpoint) =
-    Printf.sprintf "%s%s port=%d%s"
+    Printf.sprintf "%s%s port=%d %s%s"
       (match e.host with Tcp h -> "tcp " ^ h | Unix_socket d -> "unix " ^ d)
       (Option.fold ~none:""
          ~some:(fun a -> " at " ^ Ipaddr.to_string a)
          e.address)
       e.port
+      (Conninfo.ssl_mode_to_string e.ssl_mode)
       (match e.password with Some p -> " pgpass=" ^ p | None -> "")
   in
   let extra =
@@ -657,7 +675,7 @@ let show_conninfo (t : Conninfo.t) =
     t.user
     (Option.value t.password ~default:"-")
     t.database
-    (Conninfo.ssl_mode_to_string t.ssl_mode)
+    (Option.fold ~none:"-" ~some:Conninfo.ssl_mode_to_string t.ssl_mode)
     (Option.value t.ssl_root_cert ~default:"-")
     (Option.fold ~none:"-"
        ~some:(Format.asprintf "%a" Mtime.Span.pp)
@@ -681,36 +699,36 @@ let conninfo_cases =
   [
     reads "a URL, every part"
       "postgres://app:p%40ss%20word@db.example:6543/go?sslmode=verify-full&sslrootcert=/ca.pem&connect_timeout=3&application_name=demo"
-      "tcp db.example port=6543 user=app password=p@ss word dbname=go \
-       sslmode=verify-full root=/ca.pem timeout=3s app=demo";
+      "tcp db.example port=6543 verify-full user=app password=p@ss word \
+       dbname=go sslmode=verify-full root=/ca.pem timeout=3s app=demo";
     reads "postgresql:// too, and its defaults" "postgresql://app@db"
-      "tcp db port=5432 user=app password=- dbname=app sslmode=prefer root=- \
-       timeout=- app=-";
+      "tcp db port=5432 require user=app password=- dbname=app sslmode=- \
+       root=- timeout=- app=-";
     reads "an IPv6 host" "postgres://app@[::1]:5433/go"
-      "tcp ::1 port=5433 user=app password=- dbname=go sslmode=prefer root=- \
+      "tcp ::1 port=5433 prefer user=app password=- dbname=go sslmode=- root=- \
        timeout=- app=-";
     reads "a socket's directory, percent-encoded"
       "postgres://app@%2Fvar%2Frun%2Fpostgresql/go"
-      "unix /var/run/postgresql port=5432 user=app password=- dbname=go \
-       sslmode=prefer root=- timeout=- app=-";
+      "unix /var/run/postgresql port=5432 prefer user=app password=- dbname=go \
+       sslmode=- root=- timeout=- app=-";
     reads "a socket's directory, as a query" "postgres:///go?host=/tmp&user=app"
-      "unix /tmp port=5432 user=app password=- dbname=go sslmode=prefer root=- \
-       timeout=- app=-";
+      "unix /tmp port=5432 prefer user=app password=- dbname=go sslmode=- \
+       root=- timeout=- app=-";
     reads "an empty value is the key unset" "postgres://app@db/go?sslmode="
-      "tcp db port=5432 user=app password=- dbname=go sslmode=prefer root=- \
+      "tcp db port=5432 require user=app password=- dbname=go sslmode=- root=- \
        timeout=- app=-";
     reads "keywords" "host=db port=6543 user=app dbname=go sslmode=require"
-      "tcp db port=6543 user=app password=- dbname=go sslmode=require root=- \
-       timeout=- app=-";
+      "tcp db port=6543 require user=app password=- dbname=go sslmode=require \
+       root=- timeout=- app=-";
     reads "a quoted value holds a space" "user=app password='a b' host=db"
-      "tcp db port=5432 user=app password=a b dbname=app sslmode=prefer root=- \
-       timeout=- app=-";
+      "tcp db port=5432 require user=app password=a b dbname=app sslmode=- \
+       root=- timeout=- app=-";
     reads "a backslash takes the next character"
       {|user=app password='it\'s' application_name=a\ b|}
-      "tcp localhost port=5432 user=app password=it's dbname=app \
-       sslmode=prefer root=- timeout=- app=a b";
+      "tcp localhost port=5432 prefer user=app password=it's dbname=app \
+       sslmode=- root=- timeout=- app=a b";
     reads "spaces around =" "  user = app   dbname= go "
-      "tcp localhost port=5432 user=app password=- dbname=go sslmode=prefer \
+      "tcp localhost port=5432 prefer user=app password=- dbname=go sslmode=- \
        root=- timeout=- app=-";
     refuses "a key nobody reads, in a URL" "postgres://app@db/go?sslcrl=/crl"
       "sslcrl";
@@ -719,28 +737,28 @@ let conninfo_cases =
     refuses "sslpassword, with its reason" "user=app sslpassword=x"
       "no encrypted client key";
     reads "several hosts, a port each" "host=a,b port=1,2 user=app"
-      "tcp a port=1,tcp b port=2 user=app password=- dbname=app sslmode=prefer \
-       root=- timeout=- app=-";
+      "tcp a port=1 require,tcp b port=2 require user=app password=- \
+       dbname=app sslmode=- root=- timeout=- app=-";
     reads "several hosts, one port for all" "host=a,/run/pg port=7 user=app"
-      "tcp a port=7,unix /run/pg port=7 user=app password=- dbname=app \
-       sslmode=prefer root=- timeout=- app=-";
+      "tcp a port=7 require,unix /run/pg port=7 prefer user=app password=- \
+       dbname=app sslmode=- root=- timeout=- app=-";
     reads "several hosts in a URL, one with no port"
       "postgres://app@a:1,[::1]:2,c/go"
-      "tcp a port=1,tcp ::1 port=2,tcp c port=5432 user=app password=- \
-       dbname=go sslmode=prefer root=- timeout=- app=-";
+      "tcp a port=1 require,tcp ::1 port=2 prefer,tcp c port=5432 require \
+       user=app password=- dbname=go sslmode=- root=- timeout=- app=-";
     refuses "ports for some hosts and not the rest"
       "host=a,b,c port=1,2 user=app" "2 ports for 3 hosts";
     reads "hostaddr: the host's name, connected to at an address"
       "host=pg_test hostaddr=127.0.0.1 user=app"
-      "tcp pg_test at 127.0.0.1 port=5432 user=app password=- dbname=app \
-       sslmode=prefer root=- timeout=- app=-";
+      "tcp pg_test at 127.0.0.1 port=5432 prefer user=app password=- \
+       dbname=app sslmode=- root=- timeout=- app=-";
     reads "hostaddr alone is the host" "hostaddr=::1 user=app"
-      "tcp ::1 at ::1 port=5432 user=app password=- dbname=app sslmode=prefer \
-       root=- timeout=- app=-";
+      "tcp ::1 at ::1 port=5432 prefer user=app password=- dbname=app \
+       sslmode=- root=- timeout=- app=-";
     reads "hostaddr, one each, an empty one looked up"
       "postgres://app@a,b/go?hostaddr=10.0.0.5,"
-      "tcp a at 10.0.0.5 port=5432,tcp b port=5432 user=app password=- \
-       dbname=go sslmode=prefer root=- timeout=- app=-";
+      "tcp a at 10.0.0.5 port=5432 require,tcp b port=5432 require user=app \
+       password=- dbname=go sslmode=- root=- timeout=- app=-";
     refuses "hostaddr that is a name" "host=db hostaddr=db.internal user=app"
       "not an address";
     refuses "hostaddr for some hosts and not the rest"
@@ -754,19 +772,54 @@ let conninfo_cases =
        load_balance_hosts=random min_protocol_version=3.2 \
        max_protocol_version=latest options='-c search_path=x --work-mem=4MB -c \
        a=b\\\\ c -cgeqo=off'"
-      "tcp localhost port=5432 user=app password=- dbname=app \
+      "tcp localhost port=5432 verify-full user=app password=- dbname=app \
        sslmode=verify-full root=- timeout=- app=- cert=/c.pem key=/k.pem \
        direct binding=require auth=s keepalives=0 attrs=read-write random \
        min=3.2 max=3.2 options=search_path:x,work_mem:4MB,a:b c,geqo:off";
     reads "require_auth negated" "user=app require_auth=!md5,!password"
-      "tcp localhost port=5432 user=app password=- dbname=app sslmode=prefer \
+      "tcp localhost port=5432 prefer user=app password=- dbname=app sslmode=- \
        root=- timeout=- app=- auth=sn";
     refuses "require_auth mixing methods and negations"
       "user=app require_auth=md5,!password" "mixes";
     refuses "require_auth naming what is not a method"
       "user=app require_auth=kerberos" "kerberos";
-    refuses "direct TLS under prefer" "user=app sslnegotiation=direct"
-      "needs sslmode=require";
+    refuses "direct TLS under prefer"
+      "user=app sslmode=prefer sslnegotiation=direct" "needs sslmode=require";
+    reads "direct TLS, with no sslmode, requires TLS of every host"
+      "host=localhost,db user=app sslnegotiation=direct"
+      "tcp localhost port=5432 require,tcp db port=5432 require user=app \
+       password=- dbname=app sslmode=- root=- timeout=- app=- direct";
+    reads
+      "with no sslmode, this machine prefers TLS and any other host needs it"
+      "host=localhost,LocalHost,127.1.2.3,::1,/tmp,db.example,10.0.0.5,128.0.0.1 \
+       user=app"
+      "tcp localhost port=5432 prefer,tcp LocalHost port=5432 prefer,tcp \
+       127.1.2.3 port=5432 prefer,tcp ::1 port=5432 prefer,unix /tmp port=5432 \
+       prefer,tcp db.example port=5432 require,tcp 10.0.0.5 port=5432 \
+       require,tcp 128.0.0.1 port=5432 require user=app password=- dbname=app \
+       sslmode=- root=- timeout=- app=-";
+    reads "with no sslmode, where the connection goes decides"
+      "host=db,localhost hostaddr=127.0.0.1,10.0.0.5 user=app"
+      "tcp db at 127.0.0.1 port=5432 prefer,tcp localhost at 10.0.0.5 \
+       port=5432 require user=app password=- dbname=app sslmode=- root=- \
+       timeout=- app=-";
+    reads "an sslmode given is every host's"
+      "host=localhost,db.example user=app sslmode=disable"
+      "tcp localhost port=5432 disable,tcp db.example port=5432 disable \
+       user=app password=- dbname=app sslmode=disable root=- timeout=- app=-";
+    refuses "sslrootcert, which sslmode=require would not check against"
+      "user=app sslmode=require sslrootcert=/ca.pem"
+      "write sslmode=verify-full, or verify-ca";
+    refuses "sslrootcert, which prefer would not check against"
+      "user=app sslmode=prefer sslrootcert=/ca.pem"
+      "write sslmode=verify-full, or verify-ca";
+    refuses "sslrootcert, which no sslmode would check against"
+      "host=db.example user=app sslrootcert=/ca.pem"
+      "write sslmode=verify-full, or verify-ca";
+    reads "sslrootcert, with verify-ca"
+      "host=db user=app sslmode=verify-ca sslrootcert=/ca.pem"
+      "tcp db port=5432 verify-ca user=app password=- dbname=app \
+       sslmode=verify-ca root=/ca.pem timeout=- app=-";
     refuses "a required binding with TLS never used"
       "user=app sslmode=disable channel_binding=require" "needs TLS";
     refuses "a minimum above the maximum"
@@ -798,8 +851,8 @@ let conninfo_cases =
         Alcotest.(check (result string string))
           "filling what the string leaves out"
           (Ok
-             "tcp a at 10.0.0.5 port=7,tcp b port=7 user=app password=- \
-              dbname=app sslmode=require root=- timeout=- app=-")
+             "tcp a at 10.0.0.5 port=7 require,tcp b port=7 require user=app \
+              password=- dbname=app sslmode=require root=- timeout=- app=-")
           (Result.map show_conninfo (Conninfo.of_string ~defaults "user=app")));
     Alcotest.test_case "a .pgpass, as libpq reads one" `Quick (fun () ->
         let file =
@@ -816,23 +869,24 @@ let conninfo_cases =
         in
         Alcotest.(check string)
           "the first line that matches"
-          "tcp db port=5432 pgpass=first user=app password=- dbname=go \
-           sslmode=prefer root=- timeout=- app=-"
+          "tcp db port=5432 require pgpass=first user=app password=- dbname=go \
+           sslmode=- root=- timeout=- app=-"
           (read "host=db user=app dbname=go");
         Alcotest.(check string)
           "a password for each host, * for any"
-          "tcp db port=5432 pgpass=first,tcp other port=5433 pgpass=any:host \
-           user=app password=- dbname=go sslmode=prefer root=- timeout=- app=-"
+          "tcp db port=5432 require pgpass=first,tcp other port=5433 require \
+           pgpass=any:host user=app password=- dbname=go sslmode=- root=- \
+           timeout=- app=-"
           (read "host=db,other port=5432,5433 user=app dbname=go");
         Alcotest.(check string)
           "an escaped colon, and one in the password"
-          "tcp h:x port=5432 pgpass=colon: in it user=u password=- dbname=d \
-           sslmode=prefer root=- timeout=- app=-"
+          "tcp h:x port=5432 require pgpass=colon: in it user=u password=- \
+           dbname=d sslmode=- root=- timeout=- app=-"
           (read {|host='h:x' user=u dbname=d|});
         Alcotest.(check string)
           "the string's own password wins"
-          "tcp db port=5432 user=app password=given dbname=go sslmode=prefer \
-           root=- timeout=- app=-"
+          "tcp db port=5432 require user=app password=given dbname=go \
+           sslmode=- root=- timeout=- app=-"
           (read "host=db user=app dbname=go password=given"));
     refuses "no user" "postgres://db/go" "no user";
     refuses "a port that is not one" "postgres://app@db:99999/go" "not a port";
@@ -1427,6 +1481,99 @@ let a_binary_instant_reads_as_itself =
         (Option.map us_of
            (Postgres_eio.Value.timestamp column (Bytes.to_string cell))))
 
+(* Connecting, in virtual time *)
+
+exception Not_in_this_test
+
+(* A network that finds every name at the port [at] on 127.0.0.1, each
+   lookup first running [wait] shielded from cancellation, as eio_posix's
+   runs in a system thread no cancellation reaches. Connecting goes by the
+   socket, not by the network. *)
+module Lookup = struct
+  type t = { wait : unit -> unit; at : int }
+  type tag = [ `Generic ]
+
+  let listen _ ~reuse_addr:_ ~reuse_port:_ ~backlog:_ ~sw:_ _ =
+    raise Not_in_this_test
+
+  let connect _ ~bind_to:_ ~options:_ ~sw:_ _ = raise Not_in_this_test
+
+  let datagram_socket _ ~reuse_addr:_ ~reuse_port:_ ~sw:_ _ =
+    raise Not_in_this_test
+
+  let getnameinfo _ _ = raise Not_in_this_test
+
+  let getaddrinfo t ~service:_ _ =
+    Eio.Cancel.protect t.wait;
+    [ `Tcp (Eio.Net.Ipaddr.V4.loopback, t.at) ]
+end
+
+let lookup ?(at = 5432) wait =
+  Eio.Resource.T ({ Lookup.wait; at }, Eio.Net.Pi.network (module Lookup))
+
+(* connect_timeout gives a lookup up at the deadline, and does not wait for
+   it to finish. The clock is virtual, so the deadline is exact. *)
+let a_slow_lookup_is_given_up () =
+  Eio_mock.Backend.run_full @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let c =
+    Conninfo.with_connect_timeout
+      (conninfo
+         [ ("host", "db.example"); ("user", "app"); ("sslmode", "disable") ])
+      Mtime.Span.(200 * ms)
+  in
+  let started = Eio.Time.Mono.now clock in
+  match
+    Postgres_eio.connect ~sw
+      ~net:
+        (lookup (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(3 * s)))
+      ~mono_clock:clock c
+  with
+  | Error (`Unsent _) ->
+      Alcotest.(check string)
+        "given up at connect_timeout" "200ms"
+        (Format.asprintf "%a" Mtime.Span.pp
+           (Mtime.span started (Eio.Time.Mono.now clock)))
+  | Error e ->
+      Alcotest.failf "not given up: %s" (Postgres_eio.error_to_string e)
+  | Ok _ -> Alcotest.fail "connected with no address"
+
+(* A resolver does the lookup on its own fiber, and the connection stops
+   waiting at its deadline. The connection's own network finds nothing, so
+   only the resolver's could have answered. *)
+let a_resolvers_lookup_is_given_up () =
+  Eio_mock.Backend.run_full @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let resolver =
+    Postgres_eio.Resolver.create ~sw
+      ~net:
+        (lookup (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(3 * s)))
+  in
+  let c =
+    Conninfo.with_connect_timeout
+      (conninfo
+         [ ("host", "db.example"); ("user", "app"); ("sslmode", "disable") ])
+      Mtime.Span.(200 * ms)
+  in
+  let started = Eio.Time.Mono.now clock in
+  let answer =
+    Postgres_eio.connect ~sw
+      ~net:(lookup (fun () -> raise Not_in_this_test))
+      ~mono_clock:clock ~resolver c
+  in
+  Postgres_eio.Resolver.close resolver;
+  match answer with
+  | Error (`Unsent _) ->
+      Alcotest.(check string)
+        "given up at connect_timeout" "200ms"
+        (Format.asprintf "%a" Mtime.Span.pp
+           (Mtime.span started (Eio.Time.Mono.now clock)))
+  | Error e ->
+      Alcotest.failf "not given up: %s" (Postgres_eio.error_to_string e)
+  | Ok _ -> Alcotest.fail "connected with no address"
+
 (* Against a real server, named by POSTGRES_EIO_TEST_PG (see compose.yaml).
    Skipped when unset. *)
 
@@ -1473,7 +1620,7 @@ let shorter what took ~than =
 
 let connect_with ?parameters ?timeout env sw c =
   Pg.connect ~sw ~net:(Eio.Stdenv.net env)
-    ~clock:(Eio.Stdenv.mono_clock env)
+    ~mono_clock:(Eio.Stdenv.mono_clock env)
     ?parameters ?timeout c
 
 let ok_pg = function
@@ -1569,7 +1716,7 @@ let verify_full_refuses_an_untrusted_certificate () =
     connect_with env sw
       (set (base ()) [ ("sslmode", "verify-full"); ("sslrootcert", "") ])
   with
-  | Error (Pg.Io _) -> ()
+  | Error (`Unsent _) -> ()
   | Error e ->
       Alcotest.failf "refused, but not in the handshake: %s"
         (Pg.error_to_string e)
@@ -1609,7 +1756,7 @@ let signed_in_by_md5 () =
     (one t "select current_user" []);
   Pg.close t;
   match connect_with env sw (as_role (plain ()) "pgeio_md5" (Some "wrong")) with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "a wrong password" "28P01"
         (Pg.Server_error.sqlstate e)
@@ -1678,8 +1825,7 @@ let cleartext_without_tls_is_refused () =
     set (at ~port "127.0.0.1" (plain ())) [ ("password", "never-sent") ]
   in
   (match connect_with env sw c with
-  | Error (Pg.Refused m) ->
-      Alcotest.(check bool) m true (contains m "cleartext")
+  | Error (`Refused m) -> Alcotest.(check bool) m true (contains m "cleartext")
   | Error e -> Alcotest.failf "not refused here: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected");
   Eio.Promise.await closed;
@@ -1748,7 +1894,7 @@ let a_statement_is_described_without_running () =
     "and nothing was run" "0"
     (one t "select count(*) from d" []);
   (match Pg.describe t "selec 1" with
-  | Error (Pg.Server _) -> ()
+  | Error (`Server _) -> ()
   | Error e ->
       Alcotest.failf "not the server's refusal: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "a statement that does not parse was described");
@@ -1773,7 +1919,7 @@ let a_running_statement_is_cancelled () =
       ok_pg (Pg.cancel t));
   let took = since clock started in
   (match !answer with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string) "cancelled" "57014" (Pg.Server_error.sqlstate e)
   | Error e -> Alcotest.failf "not cancelled: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "the statement ran to its end");
@@ -1800,7 +1946,7 @@ let a_cancel_over_tls () =
       Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
       ok_pg (Pg.cancel t));
   (match !answer with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string) "cancelled" "57014" (Pg.Server_error.sqlstate e)
   | _ -> Alcotest.fail "not cancelled");
   Pg.close t
@@ -1828,8 +1974,10 @@ let a_reset_keeps_its_parameters () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool)
     "and says so" true
-    (match Pg.script t "select 1" with Error Pg.Closed -> true | _ -> false);
-  ok_pg (Pg.reset t);
+    (match Pg.script t "select 1" with
+    | Error (`Connection `Closed) -> true
+    | _ -> false);
+  ok_pg (Pg.revive t);
   Alcotest.(check string)
     "client_min_messages" "warning"
     (one t "show client_min_messages" []);
@@ -1849,7 +1997,7 @@ let a_silent_server_times_out () =
        env sw
        (at ~port "127.0.0.1" (plain ()))
    with
-  | Error Pg.Timeout -> ()
+  | Error (`Unsent m) when contains m "timeout" -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to nothing");
   let took = since clock started in
@@ -1868,7 +2016,7 @@ let timed_out_after env sw ?timeout connect_timeout =
           ~some:(Conninfo.with_connect_timeout c)
           connect_timeout)
    with
-  | Error Pg.Timeout -> ()
+  | Error (`Unsent m) when contains m "timeout" -> ()
   | Error e -> Alcotest.failf "not a timeout: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to nothing");
   since clock started
@@ -1900,11 +2048,11 @@ let a_read_past_the_timeout () =
   Alcotest.(check bool)
     "a timeout" true
     (match Pg.execute t "select pg_sleep(2)" ~params:[] with
-    | Error Pg.Timeout -> true
+    | Error (`Lost m) when contains m "timeout" -> true
     | _ -> false);
   Alcotest.(check bool)
     "and the connection closed, out of step" true (Pg.closed t);
-  ok_pg (Pg.reset t);
+  ok_pg (Pg.revive t);
   Pg.set_timeout t ~timeout:None;
   Alcotest.(check string)
     "lifted, a long statement runs" ""
@@ -1971,7 +2119,7 @@ let a_timed_out_statement_is_cancelled_at_the_server () =
   let t = connect ~timeout:Mtime.Span.(500 * ms) env sw (plain ()) in
   let pid = one t "select pg_backend_pid()::text" [] in
   (match Pg.execute t "select pg_sleep(60)" ~params:[] with
-  | Error Pg.Timeout -> ()
+  | Error (`Lost m) when contains m "timeout" -> ()
   | Ok _ -> Alcotest.fail "no timeout"
   | Error e -> Alcotest.fail (Pg.error_to_string e));
   Alcotest.(check bool) "closed" true (Pg.closed t);
@@ -2020,7 +2168,7 @@ let a_server_error_keeps_the_connection () =
   with_eio @@ fun env sw ->
   let t = connect env sw (plain ()) in
   (match Pg.execute t "select 1/0" ~params:[] with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "its SQLSTATE" "22012"
         (Pg.Server_error.sqlstate e);
@@ -2040,7 +2188,7 @@ let a_server_error_keeps_the_connection () =
       Alcotest.(check (option string)) "no hint" None (Pg.Server_error.hint e)
   | _ -> Alcotest.fail "not the server's error");
   (match Pg.execute t "select no_such_function(1)" ~params:[] with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "an undefined function" "42883"
         (Pg.Server_error.sqlstate e);
@@ -2051,7 +2199,7 @@ let a_server_error_keeps_the_connection () =
   script t "create temp table u (n int constraint u_n unique)";
   script t "insert into u values (1)";
   (match Pg.execute t "insert into u values ($1::int)" ~params:[ Some "1" ] with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "a unique violation" "23505"
         (Pg.Server_error.sqlstate e);
@@ -2101,7 +2249,7 @@ let a_script_of_several_statements () =
      Pg.script t
        "insert into a values (3); select 1/0; insert into a values (4)"
    with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string) "the error" "22012" (Pg.Server_error.sqlstate e)
   | _ -> Alcotest.fail "no error");
   Alcotest.(check string)
@@ -2128,7 +2276,7 @@ let the_rest_of_a_query () =
   (match
      Pg.query t "select 1\000" ~params:[] ~init:() ~row:(fun () _ -> ())
    with
-  | Error (Pg.Refused _) -> ()
+  | Error (`Refused _) -> ()
   | _ -> Alcotest.fail "a NUL in a statement was sent");
   Alcotest.(check bool)
     "refused before sending, so still open" false (Pg.closed t);
@@ -2157,7 +2305,7 @@ let executed_for_its_effect () =
     "a select's rows discarded and counted" ("SELECT", Some 3)
     (tag (Pg.execute t "select generate_series(1, 3)" ~params:[]));
   (match Pg.execute t "insert into e values ($1)" ~params:[ Some "1" ] with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string) "a refusal" "23505" (Pg.Server_error.sqlstate e)
   | _ -> Alcotest.fail "a duplicate was inserted");
   Alcotest.(check bool) "and kept the connection" false (Pg.closed t);
@@ -2168,7 +2316,7 @@ let executed_for_its_effect () =
       [ "2"; "3"; "2" ]
   in
   (match List.map Pg.Pipeline.get answers with
-  | [ Ok first; Ok second; Error (Pg.Server _) ] ->
+  | [ Ok first; Ok second; Error (`Server _) ] ->
       Alcotest.(check (list (option int)))
         "54.2.4 pipelined, in order" [ Some 1; Some 1 ]
         [ Pg.Tag.rows first; Pg.Tag.rows second ]
@@ -2185,14 +2333,14 @@ let copy_is_refused () =
   List.iter
     (fun sql ->
       (match Pg.query t sql ~params:[] ~init:() ~row:(fun () _ -> ()) with
-      | Error (Pg.Refused m) -> Alcotest.(check bool) m true (contains m "COPY")
+      | Error (`Refused m) -> Alcotest.(check bool) m true (contains m "COPY")
       | _ -> Alcotest.failf "%s was not refused" sql);
       Alcotest.(check string)
         (sql ^ ", and the connection is usable")
         "1" (one t "select 1" []))
     [ "copy c from stdin"; "copy (select 1) to stdout" ];
   (match Pg.script t "copy c from stdin" with
-  | Error (Pg.Refused _) -> ()
+  | Error (`Refused _) -> ()
   | _ -> Alcotest.fail "a simple COPY was not refused");
   Alcotest.(check string) "and after a simple one" "1" (one t "select 1" []);
   Pg.close t
@@ -2324,7 +2472,7 @@ let a_refusal_part_way () =
   script t "create temp table c (n int)";
   let rows = List.to_seq [ [| Some "1" |]; [| Some "two" |]; [| Some "3" |] ] in
   (match Pg.copy_in_rows t ~table:"c" ~columns:[ "n" ] rows with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "the server's reason" "22P02"
         (Pg.Server_error.sqlstate e)
@@ -2340,14 +2488,14 @@ let the_wrong_statement () =
   let t = connect env sw (plain ()) in
   script t "create temp table c (n int)";
   let refused what = function
-    | Error (Pg.Refused m) ->
+    | Error (`Refused m) ->
         Alcotest.(check bool) (what ^ ": " ^ m) true (contains m "not a COPY");
         in_step t
     | Error e -> Alcotest.failf "%s: %s" what (Pg.error_to_string e)
     | Ok _ -> Alcotest.failf "%s was carried" what
   in
   let server what = function
-    | Error (Pg.Server _) -> in_step t
+    | Error (`Server _) -> in_step t
     | Error e -> Alcotest.failf "%s: %s" what (Pg.error_to_string e)
     | Ok _ -> Alcotest.failf "%s was carried" what
   in
@@ -2373,14 +2521,14 @@ let a_nul_in_a_copy () =
      Pg.copy_in_rows t ~table:"c" ~columns:[ "s" ]
        (List.to_seq [ [| Some "a" |]; [| Some "b\000c" |] ])
    with
-  | Error (Pg.Refused m) -> Alcotest.(check bool) m true (contains m "NUL")
+  | Error (`Refused m) -> Alcotest.(check bool) m true (contains m "NUL")
   | _ -> Alcotest.fail "a value holding a NUL was not refused");
   Alcotest.(check int) "none of it" 0 (count t "c");
   in_step t;
   (* A NUL in a name is refused before sending, even on a closed connection. *)
   Pg.close t;
   match Pg.copy_in_rows t ~table:"c\000" ~columns:[] Seq.empty with
-  | Error (Pg.Refused m) -> Alcotest.(check bool) m true (contains m "NUL")
+  | Error (`Refused m) -> Alcotest.(check bool) m true (contains m "NUL")
   | _ -> Alcotest.fail "a name holding a NUL was not refused first"
 
 let a_cancelled_copy_closes () =
@@ -2397,7 +2545,7 @@ let a_cancelled_copy_closes () =
     (fun () ->
       Eio.Time.Mono.sleep_span (Eio.Stdenv.mono_clock env) Mtime.Span.(200 * ms));
   Alcotest.(check bool) "closed" true (Pg.closed t);
-  ok_pg (Pg.reset t);
+  ok_pg (Pg.revive t);
   in_step t;
   Pg.close t
 
@@ -2416,7 +2564,7 @@ let hosts c endpoints =
     ]
 
 let refused_saying what needle = function
-  | Error (Pg.Refused m) ->
+  | Error (`Refused m) ->
       Alcotest.(check bool) (what ^ ": " ^ m) true (contains m needle)
   | Error e ->
       Alcotest.failf "%s: not refused here: %s" what (Pg.error_to_string e)
@@ -2431,7 +2579,7 @@ let cancelled env t =
       Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms);
       ok_pg (Pg.cancel t));
   match !answer with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string) "cancelled" "57014" (Pg.Server_error.sqlstate e)
   | _ -> Alcotest.fail "not cancelled"
 
@@ -2442,10 +2590,12 @@ let cancelled env t =
    with [refuse n] and closed where that is some. A Query is answered with
    what [on_query] returns for its text. It counts connections. A
    CancelRequest is given to [on_cancel], and its connection closed when
-   that returns. *)
+   that returns. Each StartupMessage is first given to [on_startup], by its
+   count, which may hold it; a session that ends is given to [on_end], and
+   whether it ended by a Terminate. *)
 let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
-    ?(refuse = fun _ -> None) ?(on_query = fun _ -> "") ?(on_cancel = ignore) ()
-    =
+    ?(refuse = fun _ -> None) ?(on_query = fun _ -> "") ?(on_cancel = ignore)
+    ?(on_startup = ignore) ?(on_end = fun ~terminated:_ -> ()) () =
   let listener =
     Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env)
       (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
@@ -2477,6 +2627,7 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
             then on_cancel ()
             else begin
               incr startups;
+              on_startup !startups;
               match refuse !startups with
               | Some answer -> write answer
               | None ->
@@ -2491,7 +2642,7 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
                     ^ msg 'Z' "I");
                   let rec until_terminate () =
                     match Eio.Buf_read.any_char r with
-                    | 'X' -> ()
+                    | 'X' -> on_end ~terminated:true
                     | 'Q' ->
                         let body = Eio.Buf_read.take (take_int32 () - 4) r in
                         write
@@ -2501,6 +2652,8 @@ let a_fake_postgres env sw ?(ssl = "N") ?(before = "") ?(reported = [])
                     | _ ->
                         ignore (Eio.Buf_read.take (take_int32 () - 4) r);
                         until_terminate ()
+                    | exception (End_of_file | Eio.Io _) ->
+                        on_end ~terminated:false
                   in
                   until_terminate ()
             end
@@ -2561,7 +2714,7 @@ let a_required_binding_refuses_a_server_without_one () =
 (* A fake server that asks for SCRAM-SHA-256, takes any proof, writes
    [after_proof] and then signs the client in, so a client that does not
    check the server's proof connects. *)
-let a_scram_server env sw ~after_proof =
+let a_scram_server ?(iterations = 4096) env sw ~after_proof =
   let listener =
     Eio.Net.listen ~sw ~backlog:4 (Eio.Stdenv.net env)
       (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
@@ -2601,7 +2754,8 @@ let a_scram_server env sw ~after_proof =
             in
             write
               (msg 'R'
-                 (int32 11 ^ "r=" ^ client_nonce ^ "server,s=c2FsdA==,i=4096"));
+                 (int32 11 ^ "r=" ^ client_nonce
+                 ^ Printf.sprintf "server,s=c2FsdA==,i=%d" iterations));
             ignore (message ());
             write
               (after_proof
@@ -2623,7 +2777,7 @@ let scram_needs_the_servers_proof () =
       (set (fake (a_scram_server env sw ~after_proof)) [ ("password", "p") ])
   in
   (match connect_after "" with
-  | Error (Pg.Protocol m) ->
+  | Error (`Unsent m) ->
       Alcotest.(check bool)
         ("AuthenticationOk without the proof: " ^ m)
         true
@@ -2635,6 +2789,16 @@ let scram_needs_the_servers_proof () =
   refused_saying "a proof that is not the password's" "signature"
     (connect_after
        (msg 'R' (int32 12 ^ "v=eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHg=")))
+
+(* A server asking for a hundred million iterations would hold the
+   connect, and the domain, for a minute; it is refused before the first. *)
+let scram_refuses_iterations_past_its_bound () =
+  with_eio @@ fun env sw ->
+  refused_saying "a hundred million iterations" "iterations"
+    (connect_with env sw
+       (set
+          (fake (a_scram_server env sw ~iterations:100_000_000 ~after_proof:""))
+          [ ("password", "p") ]))
 
 (* require_auth=scram-sha-256 refuses trust and password requests without
    sending the password. *)
@@ -2679,6 +2843,27 @@ let direct_tls () =
   cancelled env t;
   Pg.close t
 
+(* With no sslmode, a host on another machine needs TLS, and one on this
+   machine is reached as prefer: plain where TLS is not offered, encrypted
+   where it is. The network finds db.example at the fake, which offers no
+   TLS. *)
+let tls_by_default_where_it_crosses_a_network () =
+  with_eio @@ fun env sw ->
+  let port, _ = a_fake_postgres env sw () in
+  let elsewhere mode =
+    Pg.connect ~sw ~net:(lookup ~at:port ignore)
+      ~mono_clock:(Eio.Stdenv.mono_clock env)
+      (set (fake port) [ ("host", "db.example"); ("sslmode", mode) ])
+  in
+  refused_saying "54.2.10 a host elsewhere, with no sslmode" "sslmode=disable"
+    (elsewhere "");
+  Pg.close (ok_pg (elsewhere "disable"));
+  Pg.close (connect env sw (set (fake port) [ ("sslmode", "") ]));
+  let t = connect env sw (set (base ()) [ ("sslmode", "") ]) in
+  Alcotest.(check bool)
+    "54.2.10 this machine, encrypted where TLS is offered" true (tls_in_use t);
+  Pg.close t
+
 (* [prefer] retries without TLS where libpq does; [require] never does. *)
 let prefer_falls_back () =
   with_eio @@ fun env sw ->
@@ -2717,7 +2902,7 @@ let a_client_certificate () =
     (one t "select current_user::text" []);
   Pg.close t;
   (match connect_with env sw (set c [ ("sslcert", ""); ("sslkey", "") ]) with
-  | Error (Pg.Server _) -> ()
+  | Error (`Server _) -> ()
   | _ -> Alcotest.fail "the server let in a client with no certificate");
   refused_saying "an encrypted key" "encrypted"
     (connect_with env sw
@@ -2873,6 +3058,104 @@ let options_become_settings () =
     (one t "show search_path" []);
   Pg.close t
 
+(* A database made for one case, with [settings] as its defaults, dropped
+   when [f] returns. *)
+let in_a_database env sw ~name ?(encoding = "UTF8") ?(settings = []) f =
+  let admin = connect env sw (plain ()) in
+  let drop () =
+    script admin (Printf.sprintf "drop database if exists %s with (force)" name)
+  in
+  drop ();
+  script admin
+    (Printf.sprintf
+       "create database %s encoding '%s' lc_collate 'C' lc_ctype 'C' template \
+        template0"
+       name encoding);
+  List.iter
+    (fun (k, v) ->
+      script admin (Printf.sprintf "alter database %s set %s = '%s'" name k v))
+    settings;
+  Fun.protect
+    ~finally:(fun () ->
+      drop ();
+      Pg.close admin)
+    (fun () -> f (Conninfo.with_database (plain ()) name))
+
+(* 54.2.1: client_encoding is sent at start-up, so text is UTF-8 whatever
+   the database's encoding. *)
+let text_is_utf8_in_any_database () =
+  with_eio @@ fun env sw ->
+  in_a_database env sw ~name:"pgeio_latin1" ~encoding:"LATIN1" @@ fun c ->
+  let t = connect env sw c in
+  script t "create temp table e (s text)";
+  ignore (ok_pg (Pg.execute t "insert into e values ($1)" ~params:[ Some "é" ]));
+  Alcotest.(check string)
+    "one character" "1"
+    (one t "select length(s)::text from e" []);
+  Alcotest.(check string) "and back as it went" "é" (one t "select s from e" []);
+  Pg.close t
+
+(* 54.2.1: the settings the decoders read by are sent at start-up, over the
+   database's own defaults. *)
+let the_decoders_settings_whatever_the_database () =
+  with_eio @@ fun env sw ->
+  in_a_database env sw ~name:"pgeio_settings"
+    ~settings:
+      [
+        ("extra_float_digits", "0");
+        ("DateStyle", "SQL, DMY");
+        ("IntervalStyle", "iso_8601");
+      ]
+  @@ fun c ->
+  let t = connect env sw c in
+  let cell sql decode =
+    match
+      Pg.query t sql ~params:[] ~init:None ~row:(fun _ cells ->
+          match cells with [| cell |] -> cell | _ -> None)
+    with
+    | Ok (Some v, _) -> decode v
+    | Ok (None, _) -> None
+    | Error e -> Alcotest.fail (Pg.error_to_string e)
+  in
+  Alcotest.(check (option (float 0.)))
+    "a float to its last digit"
+    (Some (0.1 +. 0.2))
+    (cell "select 0.1::float8 + 0.2::float8" Pg.Text.to_float);
+  Alcotest.(check bool)
+    "a date" true
+    (Option.is_some (cell "select date '2026-10-14'" Pg.Text.to_date));
+  Alcotest.(check bool)
+    "an interval" true
+    (Option.is_some
+       (cell "select interval '1 day 2 hours'" Pg.Text.to_interval));
+  Pg.close t
+
+(* A setting the decoders read by, set to another value, would have every
+   cell misread; the same value is no change. *)
+let a_setting_the_decoders_need_is_kept () =
+  with_eio @@ fun env sw ->
+  refused_saying "DateStyle=German" "DateStyle"
+    (connect_with env sw ~parameters:[ ("datestyle", "German") ] (plain ()));
+  refused_saying "client_encoding=LATIN1, in options" "client_encoding"
+    (connect_with env sw
+       (set (plain ()) [ ("options", "-c client_encoding=LATIN1") ]));
+  let t = connect env sw ~parameters:[ ("DateStyle", "iso") ] (plain ()) in
+  Alcotest.(check string)
+    "the same value" "ISO, MDY"
+    (one t "show DateStyle" []);
+  Pg.close t;
+  List.iter
+    (fun spelling ->
+      let t =
+        connect env sw ~parameters:[ ("client_encoding", spelling) ] (plain ())
+      in
+      Alcotest.(check string)
+        ("UTF-8, spelt " ^ spelling)
+        "UTF8"
+        (one t "show client_encoding" []);
+      Pg.close t)
+    [ "UTF-8"; "utf8"; "Unicode"; "utf_8" ]
+
 (* PG* variables are ignored without [~defaults]. *)
 let nothing_from_the_environment_unasked () =
   with_eio @@ fun env sw ->
@@ -2957,11 +3240,11 @@ let saslprep_as_the_server_does () =
 
 (* LISTEN/NOTIFY *)
 
-let listener ?heartbeat ?timeout env sw c =
+let listener ?keep_alive ?timeout env sw c =
   ok_pg
     (Pg.Listener.connect ~sw ~net:(Eio.Stdenv.net env)
-       ~clock:(Eio.Stdenv.mono_clock env)
-       ?heartbeat ?timeout c)
+       ~mono_clock:(Eio.Stdenv.mono_clock env)
+       ?keep_alive ?timeout c)
 
 (* Fails after [within] instead of hanging. *)
 let next_within env ?(within = Mtime.Span.(5 * s)) l =
@@ -3102,7 +3385,7 @@ let a_silent_network_is_found () =
   let c = at ~port "127.0.0.1" (plain ()) in
   let l =
     listener
-      ~heartbeat:Mtime.Span.(300 * ms)
+      ~keep_alive:Mtime.Span.(300 * ms)
       ~timeout:Mtime.Span.(500 * ms)
       env sw c
   in
@@ -3127,7 +3410,7 @@ let a_quiet_listener_outlives_its_heartbeats () =
   with_eio @@ fun env sw ->
   List.iter
     (fun (said, c) ->
-      let l = listener ~heartbeat:Mtime.Span.(200 * ms) env sw c in
+      let l = listener ~keep_alive:Mtime.Span.(200 * ms) env sw c in
       ok_pg (Pg.Listener.listen l "pgeio_quiet");
       let n = connect env sw (plain ()) in
       Eio.Fiber.both
@@ -3211,7 +3494,7 @@ let a_racing_loop_notices_a_silent_server () =
   in
   let l =
     listener
-      ~heartbeat:Mtime.Span.(200 * ms)
+      ~keep_alive:Mtime.Span.(200 * ms)
       ~timeout:Mtime.Span.(200 * ms)
       env sw (fake port)
   in
@@ -3243,7 +3526,7 @@ let a_tick_does_not_cut_a_heartbeat () =
   in
   let l =
     listener
-      ~heartbeat:Mtime.Span.(100 * ms)
+      ~keep_alive:Mtime.Span.(100 * ms)
       ~timeout:Mtime.Span.(2 * s)
       env sw (fake port)
   in
@@ -3285,7 +3568,7 @@ let a_server_starting_up_is_waited_for () =
   in
   let l =
     listener
-      ~heartbeat:Mtime.Span.(100 * ms)
+      ~keep_alive:Mtime.Span.(100 * ms)
       ~timeout:Mtime.Span.(200 * ms)
       env sw (fake port)
   in
@@ -3308,7 +3591,7 @@ let a_refused_sign_in_is_returned () =
   script admin "alter role pgeio_listener password 'second'";
   terminate_by_name admin "pgeio-refused";
   (match next_within env ~within:Mtime.Span.(2 * s) l with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "the server's refusal" "28P01"
         (Pg.Server_error.sqlstate e)
@@ -3335,7 +3618,7 @@ let a_notification_read_with_an_answer () =
   in
   let l =
     listener
-      ~heartbeat:Mtime.Span.(100 * ms)
+      ~keep_alive:Mtime.Span.(100 * ms)
       ~timeout:Mtime.Span.(100 * ms)
       env sw (fake port)
   in
@@ -3355,11 +3638,11 @@ let a_payload_past_the_limit () =
     (String.length (heard env l).payload);
   Pg.close n;
   (match Pg.notify n ~channel:"pgeio_long" (String.make 8000 'x') with
-  | Error (Pg.Refused m) -> Alcotest.(check bool) m true (contains m "8000")
+  | Error (`Refused m) -> Alcotest.(check bool) m true (contains m "8000")
   | _ -> Alcotest.fail "8000 bytes were not refused before sending");
   Pg.Listener.close l;
   match Pg.Listener.next l with
-  | Error Pg.Closed -> ()
+  | Error (`Connection `Closed) -> ()
   | _ -> Alcotest.fail "a closed listener did not say so"
 
 (* Statements and pipelining *)
@@ -3380,7 +3663,7 @@ let ours t =
 let connect_cached ?statement_cache ?timeout env sw c =
   ok_pg
     (Pg.connect ~sw ~net:(Eio.Stdenv.net env)
-       ~clock:(Eio.Stdenv.mono_clock env)
+       ~mono_clock:(Eio.Stdenv.mono_clock env)
        ?statement_cache ?timeout c)
 
 let value t sql params =
@@ -3405,7 +3688,7 @@ let a_statement_is_parsed_once () =
           "select statement from pg_prepared_statements where name like \
            'postgres_eio_%' and statement not like '%pg_prepared_statements%'"
           []));
-  ok_pg (Pg.reset t);
+  ok_pg (Pg.revive t);
   Alcotest.(check int) "after a reset, only the query asking" 1 (ours t);
   Pg.close t
 
@@ -3446,7 +3729,7 @@ let a_stale_plan () =
   script t "begin";
   script t "alter table s add column c int";
   (match width () with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "inside one, the error" "0A000"
         (Pg.Server_error.sqlstate e)
@@ -3517,7 +3800,7 @@ let a_batch () =
   (match
      Pg.execute_many t "insert into b values ($1)" ~params:(rows ~bad:7_000 ())
    with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "row 7,000's refusal" "22P02"
         (Pg.Server_error.sqlstate e)
@@ -3546,7 +3829,7 @@ let a_pipeline () =
     "a" (Ok [ "a" ])
     (answer_int (Pg.Pipeline.get a));
   (match Pg.Pipeline.get b with
-  | Error (Pg.Server e) ->
+  | Error (`Server e) ->
       Alcotest.(check string)
         "b's own error" "22012"
         (Pg.Server_error.sqlstate e)
@@ -3567,7 +3850,7 @@ let a_pipeline () =
       ]
   in
   (match List.rev_map Pg.Pipeline.get answers with
-  | Ok (_, commit) :: Error (Pg.Server e) :: _ ->
+  | Ok (_, commit) :: Error (`Server e) :: _ ->
       Alcotest.(check string)
         "after the failure, refused" "25P02"
         (Pg.Server_error.sqlstate e);
@@ -3616,7 +3899,7 @@ let a_refused_parse_down_a_pipeline () =
   List.iter
     (fun (what, answer) ->
       match Pg.Pipeline.get answer with
-      | Error (Pg.Server e) ->
+      | Error (`Server e) ->
           Alcotest.(check string) what "42601" (Pg.Server_error.sqlstate e)
       | _ -> Alcotest.failf "%s was not refused" what)
     [ ("the first", a); ("the second", b) ];
@@ -3806,7 +4089,7 @@ let a_copy_the_server_answers_as_it_goes () =
         [| Some (if i = 1 then "two" else string_of_int i) |])
   in
   (match Pg.copy_in_rows t ~table:"strict" ~columns:[ "n" ] rows with
-  | Error (Pg.Server _) -> ()
+  | Error (`Server _) -> ()
   | _ -> Alcotest.fail "the refusal was not returned");
   if !pulled >= 1_000_000 then
     Alcotest.fail "every row was sent after the server refused the second";
@@ -3828,7 +4111,7 @@ let a_slow_row_function_is_not_timed () =
   | Ok _ -> Alcotest.fail "rows lost"
   | Error e -> Alcotest.failf "%s" (Pg.error_to_string e));
   (match Pg.execute t "select pg_sleep(1)" ~params:[] with
-  | Error Pg.Timeout -> ()
+  | Error (`Lost m) when contains m "timeout" -> ()
   | _ -> Alcotest.fail "a server slower than the timeout was waited for");
   Alcotest.(check bool) "and that closed it" true (Pg.closed t)
 
@@ -4328,7 +4611,7 @@ let a_name_tls_cannot_carry () =
     connect_with env sw
       (set c [ ("sslmode", "verify-full"); ("sslrootcert", ca) ])
   with
-  | Error (Pg.Refused m) ->
+  | Error (`Refused m) ->
       Alcotest.(check bool) m true (contains m "not a name TLS can check")
   | Error e -> Alcotest.failf "not refused here: %s" (Pg.error_to_string e)
   | Ok _ -> Alcotest.fail "connected to a name it could not check"
@@ -4366,9 +4649,7 @@ let drain_and_flush () =
     (match Pg.status t with Pg.In_transaction -> true | _ -> false);
   Alcotest.(check bool)
     "the error kept in its answer" true
-    (match Pg.Pipeline.get failed with
-    | Error (Pg.Server _) -> true
-    | _ -> false);
+    (match Pg.Pipeline.get failed with Error (`Server _) -> true | _ -> false);
   script t "rollback";
   let flushed = q "select 'f'" in
   Alcotest.(check (result unit string))
@@ -4379,6 +4660,30 @@ let drain_and_flush () =
     (answer_int (Pg.Pipeline.get flushed));
   in_step t;
   Pg.close t
+
+(* A close tells each outstanding answer whether its statement went out:
+   one sent may have run, one only queued never did. *)
+let a_close_says_what_was_sent () =
+  with_eio @@ fun env sw ->
+  let t = connect_cached env sw (plain ()) in
+  let q sql = Pg.Pipeline.query t sql ~params:[] ~init:[] ~row:one_value in
+  let sent = q "select 's'" in
+  ok_pg (Pg.Pipeline.flush t);
+  let queued = q "select 'q'" in
+  Pg.close t;
+  Alcotest.(check bool)
+    "54.2.4 sent, and lost" true
+    (match Pg.Pipeline.get sent with Error (`Lost _) -> true | _ -> false);
+  Alcotest.(check bool)
+    "54.2.4 queued, and never sent" true
+    (match Pg.Pipeline.get queued with
+    | Error (`Connection `Closed) -> true
+    | _ -> false);
+  Alcotest.(check bool)
+    "a statement after the close, never sent" true
+    (match Pg.script t "select 1" with
+    | Error (`Connection `Closed) -> true
+    | _ -> false)
 
 (* Any text, NULLs among it, goes in by COPY and comes back as it went,
    against the escaping a hand-picked list could miss. *)
@@ -4563,6 +4868,8 @@ let connection_cases =
       drain_and_flush;
     Alcotest.test_case "54.2.9 a close sends Terminate" `Quick
       a_close_sends_terminate;
+    Alcotest.test_case "54.2.4 a close says what was sent" `Quick
+      a_close_says_what_was_sent;
     Alcotest.test_case "54.2.6 any rows, through COPY and back" `Quick
       any_rows_through_copy;
     Alcotest.test_case "instants across the years, bound" `Quick
@@ -4605,11 +4912,15 @@ let connection_cases =
       `Quick a_required_binding_refuses_a_server_without_one;
     Alcotest.test_case "54.3.1 SCRAM needs the server's proof" `Quick
       scram_needs_the_servers_proof;
+    Alcotest.test_case "54.3.1 SCRAM refuses iterations past its bound" `Quick
+      scram_refuses_iterations_past_its_bound;
     Alcotest.test_case "require_auth refuses what it does not allow" `Quick
       require_auth_refuses_what_it_does_not_allow;
     Alcotest.test_case "54.2.10 direct TLS" `Quick direct_tls;
     Alcotest.test_case "54.2.10 prefer falls back, require never" `Quick
       prefer_falls_back;
+    Alcotest.test_case "54.2.10 TLS by default where it crosses a network"
+      `Quick tls_by_default_where_it_crosses_a_network;
     Alcotest.test_case "a client certificate" `Quick a_client_certificate;
     Alcotest.test_case "several hosts" `Quick several_hosts;
     Alcotest.test_case "a refused address leaves no socket" `Quick
@@ -4618,6 +4929,12 @@ let connection_cases =
       the_kind_of_host_asked_for;
     Alcotest.test_case "54.2.1 protocol 3.2" `Quick protocol_3_2;
     Alcotest.test_case "options become settings" `Quick options_become_settings;
+    Alcotest.test_case "54.2.1 text is UTF-8 in any database" `Quick
+      text_is_utf8_in_any_database;
+    Alcotest.test_case "54.2.1 the decoders' settings, whatever the database"
+      `Quick the_decoders_settings_whatever_the_database;
+    Alcotest.test_case "a setting the decoders need is kept" `Quick
+      a_setting_the_decoders_need_is_kept;
     Alcotest.test_case "nothing from the environment unasked" `Quick
       nothing_from_the_environment_unasked;
     Alcotest.test_case "a password from a .pgpass" `Quick
@@ -4632,7 +4949,7 @@ let pool ?parameters ?(size = 1) ?(wait = Mtime.Span.(2 * s)) ?reset
     ?max_lifetime ?idle_check env sw =
   ok_pg
     (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
-       ~clock:(Eio.Stdenv.mono_clock env)
+       ~mono_clock:(Eio.Stdenv.mono_clock env)
        ?parameters ~size ~wait ?reset ?max_lifetime ?idle_check (plain ()))
 
 let borrow p f =
@@ -4705,7 +5022,7 @@ let a_cancelled_borrower_is_not_held_by_its_cancel () =
   in
   let p =
     ok_pg
-      (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env) ~clock
+      (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env) ~mono_clock:clock
          ~timeout:Mtime.Span.(500 * ms)
          ~size:1 (fake port))
   in
@@ -4898,7 +5215,7 @@ let a_borrowers_session_is_not_the_next_ones () =
       Alcotest.(check (list string))
         "and nothing of the last borrower's" fresh (what_is_left t);
       match Pg.execute t "select currval('pgeio_seq')" ~params:[] with
-      | Error (Pg.Server _) -> ()
+      | Error (`Server _) -> ()
       | _ -> Alcotest.fail "the last borrower's sequence was seen");
   Pg.Pool.close p
 
@@ -5011,6 +5328,38 @@ let the_pools_figures () =
   Alcotest.(check int) "at least one" 1 (Pg.Pool.stats none).size;
   Pg.Pool.close none
 
+(* A create cancelled partway closes the connections it had made, each
+   with its Terminate, not left open until its switch ends. *)
+let a_cancelled_create_closes_what_it_made () =
+  with_eio @@ fun env sw ->
+  let third, reached = Eio.Promise.create () in
+  let ended = Eio.Stream.create 8 in
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_startup:(fun n ->
+        if n = 3 then begin
+          Eio.Promise.resolve reached ();
+          Eio.Fiber.await_cancel ()
+        end)
+      ~on_end:(fun ~terminated -> Eio.Stream.add ended terminated)
+      ()
+  in
+  Eio.Switch.run (fun pool_sw ->
+      Eio.Fiber.first
+        (fun () ->
+          match
+            Pg.Pool.create ~sw:pool_sw ~net:(Eio.Stdenv.net env)
+              ~mono_clock:(Eio.Stdenv.mono_clock env)
+              ~size:4 (fake port)
+          with
+          | Ok _ -> Alcotest.fail "made, with the third never answered"
+          | Error e -> Alcotest.fail (Pg.error_to_string e))
+        (fun () -> Eio.Promise.await third));
+  let first = Eio.Stream.take ended in
+  let second = Eio.Stream.take ended in
+  Alcotest.(check (list bool))
+    "54.2.9 both made, both terminated" [ true; true ] [ first; second ]
+
 let closing_a_pool_waits_for_its_borrows () =
   with_eio @@ fun env sw ->
   let p = pool env sw in
@@ -5114,7 +5463,7 @@ let elsewhere env f = Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) f
 let shared_pool ?(timeout = Mtime.Span.(30 * s)) ?(c = plain ()) env sw =
   ok_pg
     (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
-       ~clock:(Eio.Stdenv.mono_clock env)
+       ~mono_clock:(Eio.Stdenv.mono_clock env)
        ~size:1 ~timeout c)
 
 (* A statement past its timeout on another domain fails as [Timeout], and
@@ -5125,7 +5474,7 @@ let a_timeout_in_another_domain () =
   elsewhere env (fun () ->
       borrow p (fun t ->
           match Pg.execute t "select pg_sleep(2)" ~params:[] with
-          | Error Pg.Timeout -> ()
+          | Error (`Lost m) when contains m "timeout" -> ()
           | Ok _ -> Alcotest.fail "no timeout"
           | Error e -> Alcotest.fail (Pg.error_to_string e));
       Alcotest.(check string)
@@ -5202,6 +5551,48 @@ let a_cancelled_reconnect_in_another_domain () =
   Eio.Promise.resolve release ();
   Pg.Pool.close p
 
+(* A connection revived on a borrower's domain looks its host up under
+   connect_timeout too: the pool's resolver, on the pool's domain, does the
+   lookup, and the borrower stops waiting at the deadline. The lookup that
+   revives it is held until the case ends, so a revive that waited for it
+   would never return. *)
+let a_lookup_on_another_domain_is_given_up () =
+  with_eio @@ fun env sw ->
+  let port, _ = a_fake_postgres env sw () in
+  let looked_up = Atomic.make 0 in
+  let held, release = Eio.Promise.create () in
+  let net =
+    lookup ~at:port (fun () ->
+        if Atomic.fetch_and_add looked_up 1 > 0 then Eio.Promise.await held)
+  in
+  let c =
+    Conninfo.with_connect_timeout
+      (set (fake port) [ ("host", "db.example") ])
+      Mtime.Span.(500 * ms)
+  in
+  let p =
+    ok_pg
+      (Pg.Pool.create ~sw ~net
+         ~mono_clock:(Eio.Stdenv.mono_clock env)
+         ~size:1 c)
+  in
+  Fun.protect
+    ~finally:(fun () ->
+      Eio.Promise.resolve release ();
+      Pg.Pool.close p)
+    (fun () ->
+      borrow p Pg.close;
+      elsewhere env (fun () ->
+          borrow p (fun t ->
+              Alcotest.(check bool)
+                "revived in vain, the lookup given up" true
+                (match Pg.script t "select 1" with
+                | Error (`Connection `Closed) -> true
+                | _ -> false)));
+      Alcotest.(check bool)
+        "and the lookup still held" false
+        (Eio.Promise.is_resolved held))
+
 (* A borrow cancelled on another domain stops its statement at the
    server. *)
 let a_cancelled_borrow_in_another_domain () =
@@ -5238,10 +5629,10 @@ let a_connection_used_in_another_domain () =
   let t = connect ~timeout:Mtime.Span.(500 * ms) env sw (plain ()) in
   elsewhere env (fun () ->
       (match Pg.execute t "select pg_sleep(2)" ~params:[] with
-      | Error Pg.Timeout -> ()
+      | Error (`Lost m) when contains m "timeout" -> ()
       | Ok _ -> Alcotest.fail "no timeout"
       | Error e -> Alcotest.fail (Pg.error_to_string e));
-      ok_pg (Pg.reset t);
+      ok_pg (Pg.revive t);
       Alcotest.(check string) "reset there" "1" (one t "select 1" []);
       Pg.close t);
   Alcotest.(check bool) "closed here too" true (Pg.closed t)
@@ -5308,7 +5699,10 @@ let a_cancelled_reset_gives_the_connection_back () =
     | Error e -> Alcotest.fail e
   in
   let p =
-    ok_pg (Pg.Pool.create ~sw ~net ~clock ~size:1 ~wait:Mtime.Span.(1 * s) c)
+    ok_pg
+      (Pg.Pool.create ~sw ~net ~mono_clock:clock ~size:1
+         ~wait:Mtime.Span.(1 * s)
+         c)
   in
   borrow p (fun t ->
       Alcotest.(check bool)
@@ -5335,7 +5729,7 @@ let a_reset_that_fails_says_why () =
         let p =
           ok_pg
             (Pg.Pool.create ~sw ~net:(Eio.Stdenv.net env)
-               ~clock:(Eio.Stdenv.mono_clock env)
+               ~mono_clock:(Eio.Stdenv.mono_clock env)
                ~size:1
                (as_role (plain ()) "pgeio_reset" (Some "before")))
         in
@@ -5349,9 +5743,9 @@ let a_reset_that_fails_says_why () =
         borrow p (fun t -> ignore (Pg.script t "select 1"));
         borrow p (fun t ->
             Alcotest.(check bool)
-              "its statement answers Closed" true
+              "its statement answers that its connection is closed" true
               (match Pg.script t "select 1" with
-              | Error Pg.Closed -> true
+              | Error (`Connection `Closed) -> true
               | Ok () | Error _ -> false));
         Pg.Pool.close p)
   in
@@ -5371,6 +5765,8 @@ let pool_cases =
       a_reconnect_in_another_domain;
     Alcotest.test_case "a cancelled reconnect in another domain" `Quick
       a_cancelled_reconnect_in_another_domain;
+    Alcotest.test_case "a lookup on another domain is given up" `Quick
+      a_lookup_on_another_domain_is_given_up;
     Alcotest.test_case "a cancelled borrow in another domain" `Quick
       a_cancelled_borrow_in_another_domain;
     Alcotest.test_case "a TLS connection in another domain" `Quick
@@ -5408,6 +5804,8 @@ let pool_cases =
     Alcotest.test_case "a dead idle connection is checked" `Quick
       a_dead_idle_connection_is_checked;
     Alcotest.test_case "the pool's figures" `Quick the_pools_figures;
+    Alcotest.test_case "a cancelled create closes what it made" `Quick
+      a_cancelled_create_closes_what_it_made;
     Alcotest.test_case "closing a pool waits for its borrows" `Quick
       closing_a_pool_waits_for_its_borrows;
     Alcotest.test_case "a closed pool answers at once" `Quick
@@ -5454,7 +5852,16 @@ let () =
             scram_names_nobody_by_default;
           Alcotest.test_case "SCRAM refuses a server it cannot trust" `Quick
             scram_refuses_a_server_it_cannot_trust;
+          Alcotest.test_case "RFC 5802 §5.1 SCRAM bounds its iterations" `Quick
+            scram_bounds_its_iterations;
           Alcotest.test_case "54.3 MD5" `Quick md5;
+        ] );
+      ( "connecting",
+        [
+          Alcotest.test_case "a slow name lookup is given up at the deadline"
+            `Quick a_slow_lookup_is_given_up;
+          Alcotest.test_case "a resolver's lookup is given up at the deadline"
+            `Quick a_resolvers_lookup_is_given_up;
         ] );
       ( "connection strings",
         conninfo_cases @ [ QCheck_alcotest.to_alcotest a_url_reads_back ] );

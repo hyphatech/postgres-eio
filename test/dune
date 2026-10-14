@@ -8,6 +8,7 @@
   cstruct
   ipaddr
   eio
+  eio.mock
   eio_main
   mtime
   mirage-crypto-rng

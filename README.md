@@ -43,7 +43,7 @@ let () =
   | Ok conninfo -> (
       match
         Postgres_eio.connect ~sw ~net:(Eio.Stdenv.net env)
-          ~clock:(Eio.Stdenv.mono_clock env) conninfo
+          ~mono_clock:(Eio.Stdenv.mono_clock env) conninfo
       with
       | Error e -> prerr_endline (Postgres_eio.error_to_string e)
       | Ok conn ->
@@ -61,6 +61,24 @@ let () =
 
 Parameters are `$1`, `$2`, ... with `None` for NULL. Rows are folded as they
 arrive and never buffered.
+
+Every connection sets the session settings the decoders read text by, over
+the database's and the role's defaults: `client_encoding=UTF8`,
+`DateStyle=ISO`, `IntervalStyle=postgres` and `extra_float_digits=3`. Text
+is UTF-8 in a `LATIN1` database too, and a float reads back to its last
+digit. A parameter or an `options` setting that changes one of them is
+refused.
+
+Every failure is a polymorphic variant, so a connection's failures join a
+pool's and your own in one result:
+
+| | |
+|---|---|
+| `` `Server e `` | the server refused, and said why (`Server_error`) |
+| `` `Refused m `` | the driver refused: an unsafe sign-in, an untrusted certificate, a value it cannot send |
+| `` `Lost m `` | sent, and no answer came back -- a timeout, a broken socket; the statement may have run, so it is not run again blindly |
+| `` `Unsent m `` | connecting failed before anything was sent; connecting again is safe |
+| `` `Connection `Closed `` | the connection was closed before the statement was sent |
 
 A statement run for its effect needs no fold, and answers its tag:
 
@@ -83,8 +101,8 @@ ignored.
 | `user` | | required |
 | `password` | | |
 | `dbname` | | `user` |
-| `sslmode` | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` |
-| `sslrootcert` | PEM file of trusted CAs | system CAs |
+| `sslmode` | `disable`, `allow`, `prefer`, `require`, `verify-ca`, `verify-full` | `prefer` on this machine, `require` elsewhere |
+| `sslrootcert` | PEM file of trusted CAs, for `verify-ca` and `verify-full` | system CAs |
 | `sslcert`, `sslkey` | PEM client certificate and unencrypted key | |
 | `sslnegotiation` | `postgres`, or `direct` for TLS from the first byte (needs `require` or stronger) | `postgres` |
 | `channel_binding` | `disable`, `prefer`, `require` | `prefer` |
@@ -96,6 +114,17 @@ ignored.
 | `load_balance_hosts` | `disable`, `random` | `disable` |
 | `min_protocol_version`, `max_protocol_version` | `3.0`, `3.2`, `latest` | `3.0` |
 | `options` | `-c name=value` settings, sent as startup parameters | |
+
+`sslmode` means what it means to libpq. `require` encrypts and checks no
+certificate, so it keeps out a listener but not a server that pretends;
+`verify-ca` checks the certificate against `sslrootcert`, and
+`verify-full` checks too that it names the host -- the mode for
+production. With no `sslmode`, a host on this machine (`localhost`,
+127.0.0.0/8, `::1`, a Unix socket) is `prefer`, and any other host is
+`require`, so a connection that crosses a network is encrypted unless the
+string says `sslmode=disable` or `prefer`. `sslrootcert` is refused with
+any mode but `verify-full` and `verify-ca`, or with none, since nothing
+else reads it: write `sslmode=verify-full` to check against the file.
 
 The driver reads no environment variables or files unless you pass them in:
 
@@ -111,7 +140,8 @@ Postgres_eio.Conninfo.of_string
 All connections open at startup, so a bad configuration fails at once. A
 returned connection is reset (open transaction, settings, temporary tables,
 locks, `LISTEN`), and the reset costs the next borrower no round trip. One
-pool serves borrowers on every domain.
+pool serves borrowers on every domain, and bounds a reconnect's name
+lookup by `connect_timeout` on each of them.
 
 ```ocaml
 let count pool =
@@ -123,7 +153,8 @@ let count pool =
 
 `Pool.use` returns `` `Pool `Busy `` if no connection frees up within
 its `wait` (5 s, or `~wait:Mtime.Span.(500 * ms)`), and `` `Pool `Closed `` at once after `Pool.close`;
-`Pool.error_to_string` prints either. Cancelling a borrower stops it at
+`Pool.error_to_string` prints either, and a connection's errors
+too, so `Result.join (Pool.use pool f)` is printed by one function. Cancelling a borrower stops it at
 once, wherever it waits: its statement is cancelled at the server, so the
 transaction rolls back, and its connection is closed and made again at the
 next lend.
@@ -164,11 +195,11 @@ let rec follow listener =
   | Error e -> Error e
 ```
 
-A `Listener` is its own connection. It detects a dead server with a
-heartbeat, reconnects with backoff and listens again, and returns
+A `Listener` is its own connection. It detects a dead server by pinging
+it after `keep_alive` (10 s) of silence, reconnects with backoff and listens again, and returns
 `Reconnected` because notifications sent meanwhile are lost. `next` can
 be raced against a timer, however short its tick: a cancelled wait keeps
-the connection and loses nothing, and the heartbeat still comes.
+the connection and loses nothing, and the ping still comes.
 
 ## Performance
 

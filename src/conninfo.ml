@@ -29,6 +29,7 @@ type endpoint = {
   address : Ipaddr.t option;
   port : int;
   password : string option;
+  ssl_mode : ssl_mode;
 }
 
 type t = {
@@ -36,7 +37,7 @@ type t = {
   user : string;
   password : string option;
   database : string;
-  ssl_mode : ssl_mode;
+  ssl_mode : ssl_mode option;
   ssl_root_cert : string option;
   ssl_cert : string option;
   ssl_key : string option;
@@ -279,10 +280,33 @@ let each f s =
     (String.split_on_char ',' s)
     (Ok [])
 
+let loopback = function
+  | Ipaddr.V4 a -> Ipaddr.V4.Prefix.mem a Ipaddr.V4.Prefix.loopback
+  | Ipaddr.V6 a -> Ipaddr.V6.compare a Ipaddr.V6.localhost = 0
+
+(* With no sslmode, a host whose traffic never leaves this machine is
+   [prefer], and any other needs TLS, as does every host under direct
+   negotiation. Where the connection goes decides: [hostaddr] when given. *)
+let default_ssl_mode ~negotiation host address =
+  let on_this_machine =
+    match (host, address) with
+    | Unix_socket _, _ -> true
+    | Tcp _, Some ip -> loopback ip
+    | Tcp name, None -> (
+        String.equal (String.lowercase_ascii name) "localhost"
+        ||
+        match Ipaddr.of_string name with
+        | Ok ip -> loopback ip
+        | Error _ -> false)
+  in
+  match negotiation with
+  | Postgres when on_this_machine -> Prefer
+  | Postgres | Direct -> Require
+
 (* Ports are one for all hosts or one each; addresses one each. As in
    libpq, [host] is the name TLS verifies and [hostaddr] only where to
    connect; with no host, the address is the host. *)
-let endpoints ~hosts ~addresses ports =
+let endpoints ~hosts ~addresses ~ssl_mode ~negotiation ports =
   let* addresses =
     match addresses with
     | None -> Ok None
@@ -327,7 +351,18 @@ let endpoints ~hosts ~addresses ports =
         Error
           (Printf.sprintf
              "hostaddr is a TCP address, and %S is a socket's directory" d)
-    | _ -> Ok { host; address; port; password = None }
+    | _ ->
+        Ok
+          {
+            host;
+            address;
+            port;
+            password = None;
+            ssl_mode =
+              (match ssl_mode with
+              | Some mode -> mode
+              | None -> default_ssl_mode ~negotiation host address);
+          }
   in
   List.fold_right2
     (fun h p acc ->
@@ -380,32 +415,49 @@ let of_pairs pairs =
     | Some u -> Ok u
     | None -> Error "the connection string names no user"
   in
-  let* hosts =
-    endpoints ~hosts:(find "host") ~addresses:(find "hostaddr")
-      (Option.value (find "port") ~default:"5432")
+  let* ssl_mode =
+    match find "sslmode" with
+    | None -> Ok None
+    | Some s -> Result.map Option.some (one_of "sslmode" ssl_modes s)
   in
-  let* ssl_mode = chosen "sslmode" ssl_modes ~default:Prefer in
   let* ssl_negotiation =
     chosen "sslnegotiation"
       [ ("postgres", Postgres); ("direct", Direct) ]
       ~default:Postgres
   in
+  let* hosts =
+    endpoints ~hosts:(find "host") ~addresses:(find "hostaddr") ~ssl_mode
+      ~negotiation:ssl_negotiation
+      (Option.value (find "port") ~default:"5432")
+  in
+  let* () =
+    (* A file only a verified mode reads would be silently ignored. *)
+    match (ssl_mode, find "sslrootcert") with
+    | (None | Some (Disable | Allow | Prefer | Require)), Some _ ->
+        Error
+          "sslrootcert is read only to check the server's certificate, which \
+           only sslmode=verify-full and verify-ca do, so here it would be \
+           ignored: write sslmode=verify-full, or verify-ca, to check against \
+           that file"
+    | Some (Verify_ca | Verify_full), _ | _, None -> Ok ()
+  in
   let* () =
     match (ssl_negotiation, ssl_mode) with
-    | Direct, (Disable | Allow | Prefer) ->
+    | Direct, Some ((Disable | Allow | Prefer) as weak) ->
         Error
           (Printf.sprintf
              "sslnegotiation=direct needs sslmode=require or stronger, not %s: \
               anything weaker could fall back to signing in without TLS"
-             (ssl_mode_to_string ssl_mode))
-    | Direct, (Require | Verify_ca | Verify_full) | Postgres, _ -> Ok ()
+             (ssl_mode_to_string weak))
+    | Direct, (None | Some (Require | Verify_ca | Verify_full)) | Postgres, _ ->
+        Ok ()
   in
   let* channel_binding =
     chosen "channel_binding" channel_bindings ~default:Binding_preferred
   in
   let* () =
     match (channel_binding, ssl_mode) with
-    | Binding_required, Disable ->
+    | Binding_required, Some Disable ->
         Error
           "channel_binding=require needs TLS, which sslmode=disable never uses"
     | _ -> Ok ()
@@ -885,7 +937,7 @@ let to_url t =
                       Option.fold ~none:"" ~some:Ipaddr.to_string e.address)
                     t.hosts))
           else None );
-        ("sslmode", Some (ssl_mode_to_string t.ssl_mode));
+        ("sslmode", Option.map ssl_mode_to_string t.ssl_mode);
         ("sslrootcert", t.ssl_root_cert);
         ("sslcert", t.ssl_cert);
         ("sslkey", t.ssl_key);
