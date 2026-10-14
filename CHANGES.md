@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.5.0 (2026-10-14)
 
 - Breaking: the words are the stack's own. `connect`'s, `Listener.connect`'s
   and `Pool.create`'s `~clock` is `~mono_clock`, `Listener.connect`'s
