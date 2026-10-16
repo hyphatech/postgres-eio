@@ -25,7 +25,8 @@ Tested with Postgres 18.
 ## Install
 
 ```sh
-opam pin add postgres-eio https://github.com/hyphatech/postgres-eio.git
+opam repo add hypha https://github.com/hyphatech/opam-repository.git
+opam install postgres-eio
 ```
 
 ```lisp
