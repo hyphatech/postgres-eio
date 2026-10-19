@@ -1,5 +1,10 @@
 # Changes
 
+## Unreleased
+
+- A message is decoded where it was read, not copied out first: a row
+  allocates about a tenth less, and a large one is no longer held twice.
+
 ## 0.5.0 (2026-10-14)
 
 - Breaking: the words are the stack's own. `connect`'s, `Listener.connect`'s

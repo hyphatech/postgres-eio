@@ -322,6 +322,12 @@ let refusals =
       "less than the four bytes";
     refused "54.7 a String with no terminator" (msg 'C' "UPDATE 3")
       "no terminator";
+    refused "54.7 a String with no terminator before the next message's"
+      (msg 'C' "UPDATE 3" ^ msg 'C' "INSERT 0 1\000")
+      "no terminator";
+    refused "54.7 a field that would end inside the next message"
+      (msg 'K' "ab" ^ msg 'Z' "I")
+      "ends inside";
     refused "54.7 bytes past the last field" (msg 'Z' "II")
       "past its last field";
     refused "54.7 a message ending inside a field" (msg 'K' "ab") "ends inside";

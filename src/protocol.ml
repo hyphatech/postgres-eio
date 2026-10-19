@@ -225,27 +225,29 @@ type backend =
       unrecognised : string list;
     }
 
-(* Every read is bounds-checked, and leftover bytes are refused like missing
-   ones: either means the sides disagree on where the message ends. *)
-type cursor = { body : string; mutable at : int; what : string }
+(* Every read is bounds-checked against [stop], and leftover bytes are
+   refused like missing ones: either means the sides disagree on where the
+   message ends. A cursor reads the reader's buffer in place, so a message is
+   decoded whole into fresh strings before the buffer is fed again. *)
+type cursor = { data : Bytes.t; mutable at : int; stop : int; what : string }
 
 exception Short of string
 
 let refuse c detail =
   raise (Short (Printf.sprintf "54.7 Message Formats: %s %s" c.what detail))
 
-let left c = String.length c.body - c.at
+let left c = c.stop - c.at
 let need c n detail = if left c < n then refuse c detail
 
 let int8 c =
   need c 1 "ends inside a byte";
-  let v = Char.code c.body.[c.at] in
+  let v = Char.code (Bytes.get c.data c.at) in
   c.at <- c.at + 1;
   v
 
 let int16 c =
   need c 2 "ends inside an Int16";
-  let v = String.get_uint16_be c.body c.at in
+  let v = Bytes.get_uint16_be c.data c.at in
   c.at <- c.at + 2;
   v
 
@@ -253,13 +255,13 @@ let int16 c =
    are signed (a varlena's size is -1). *)
 let sint16 c =
   need c 2 "ends inside an Int16";
-  let v = String.get_int16_be c.body c.at in
+  let v = Bytes.get_int16_be c.data c.at in
   c.at <- c.at + 2;
   v
 
 let int32 c =
   need c 4 "ends inside an Int32";
-  let v = Int32.to_int (String.get_int32_be c.body c.at) in
+  let v = Int32.to_int (Bytes.get_int32_be c.data c.at) in
   c.at <- c.at + 4;
   v
 
@@ -278,19 +280,19 @@ let format_of c =
 
 let bytes c n =
   need c n "ends inside a value";
-  let v = String.sub c.body c.at n in
+  let v = Bytes.sub_string c.data c.at n in
   c.at <- c.at + n;
   v
 
 let rest c = bytes c (left c)
 
 let cstring c =
-  match String.index_from_opt c.body c.at '\000' with
-  | None -> refuse c "has a String with no terminator"
-  | Some j ->
-      let v = String.sub c.body c.at (j - c.at) in
+  match Bytes.index_from_opt c.data c.at '\000' with
+  | Some j when j < c.stop ->
+      let v = Bytes.sub_string c.data c.at (j - c.at) in
       c.at <- j + 1;
       v
+  | Some _ | None -> refuse c "has a String with no terminator"
 
 (* AuthenticationSASL's mechanisms: Strings ended by an empty one. *)
 let cstrings c =
@@ -439,8 +441,8 @@ let name_of = function
   | 'v' -> "a NegotiateProtocolVersion"
   | _ -> "a message"
 
-let decode tag body =
-  let c = { body; at = 0; what = name_of tag } in
+let decode tag data ~at ~stop =
+  let c = { data; at; stop; what = name_of tag } in
   match
     let m = message tag c in
     if left c > 0 then
@@ -515,7 +517,8 @@ let next r =
            (name_of tag) len r.limit)
     else if held < 1 + len then Ok None
     else
-      let body = Bytes.sub_string r.data (r.start + 5) (len - 4) in
+      let at = r.start + 5 in
+      let decoded = decode tag r.data ~at ~stop:(at + len - 4) in
       r.start <- r.start + 1 + len;
       if r.start = r.stop then begin
         r.start <- 0;
@@ -523,4 +526,4 @@ let next r =
         if Bytes.length r.data > kept_size then
           r.data <- Bytes.create initial_size
       end;
-      Result.map Option.some (decode tag body)
+      Result.map Option.some decoded
