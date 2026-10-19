@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## 0.5.1 (2026-10-19)
 
 - A message is decoded where it was read, not copied out first: a row
   allocates about a tenth less, and a large one is no longer held twice.
