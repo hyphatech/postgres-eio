@@ -1,7 +1,8 @@
 # AGENTS.md
 
-The postgres-eio library is a native Postgres driver for OCaml 5 and Eio. This file is
-for anyone changing it, human or agent. Users start at [README.md](README.md).
+postgres-eio is an OCaml library of Hypha Stack: a native Postgres driver
+for OCaml 5 and Eio. This file is for anyone changing it, human or agent.
+Users start at [README.md](README.md).
 
 ## Commands
 
@@ -90,31 +91,3 @@ Each rule comes with why it exists and the test that catches a break.
   connection. A server error does not, since the server marks where its
   reply ends. Test: `54.2.3 a server's error keeps the connection`,
   `54.2.6 a producer that raises is a CopyFail`.
-
-## House style
-
-The house style, the OCaml checklist and the OCaml tools are
-[OCAML.md](OCAML.md), the same in every Hypha OCaml repository and changed
-in all of them together, never in one. It is imported here, so it is read
-with this file:
-
-@OCAML.md
-
-## Git
-
-How work becomes a commit -- its format, where it happens, what is pushed
--- is [GIT.md](GIT.md), the same in every Hypha repository and changed in
-all of them together, never in one. It is imported here, so it is read
-with this file:
-
-@GIT.md
-
-## Changes and releases
-
-How a change reaches the library's users -- its line in `CHANGES.md`, what
-is breaking, how a release is tagged and published -- is
-[LIBRARY.md](LIBRARY.md), the same in every Hypha library and changed in
-all of them together, never in one. It is imported here, so it is read
-with this file:
-
-@LIBRARY.md
