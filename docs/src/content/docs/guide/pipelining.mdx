@@ -1,0 +1,51 @@
+---
+title: Pipelining and batches
+---
+
+import { Code } from "@astrojs/starlight/components";
+import pipelineTotals from "@examples/pipeline_totals.ml?raw";
+import pipelineShip from "@examples/pipeline_ship.ml?raw";
+import pipelineDrain from "@examples/pipeline_drain.ml?raw";
+import addOrders from "@examples/add_orders.ml?raw";
+
+A statement normally waits for its answer before the next is sent. A
+pipeline sends many and reads their answers after, in one round trip.
+
+## A pipeline
+
+<Code code={pipelineTotals} lang="ocaml" />
+
+`Pipeline.query` and `Pipeline.execute` queue a statement, as `query` and
+`execute` run one, and answer a handle to its answer. Nothing is sent until
+an answer is asked for; then `Pipeline.get` sends everything queued and
+reads answers up to the one asked for, writing while it reads, so no
+pipeline is too long.
+
+<Code code={pipelineShip} lang="ocaml" />
+
+Each statement gets its own Sync, so it behaves as if sent alone: a
+failure does not stop the next, and inside `begin` and `commit` a failure
+aborts the transaction as usual. Answers are read in the order the
+statements were sent, across `query`, the pipeline, `execute_many` and
+`script`.
+
+## Draining
+
+<Code code={pipelineDrain} lang="ocaml" />
+
+`Pipeline.drain` sends everything and reads every answer still owed, so
+`status` is current. It fails only if the connection failed; a statement's
+error stays in its answer. `Pipeline.flush` sends everything without
+reading, and whoever reads next gets the answers; it is for a few
+statements only, since a pipeline long enough to fill the server's output
+buffer stalls until the timeout.
+
+## A batch
+
+`execute_many` runs one statement over many parameter lists in one round
+trip and one transaction:
+
+<Code code={addOrders} lang="ocaml" />
+
+If any run fails, none apply. It answers each run's tag, and discards any
+rows.

@@ -2,7 +2,10 @@
 
 postgres-eio is an OCaml library of Hypha Stack: a native Postgres driver
 for OCaml 5 and Eio. This file is for anyone changing it, human or agent.
-Users start at [README.md](README.md).
+Users start at the documentation site,
+[docs/](docs/src/content/docs/index.mdx), whose pages import each example
+from `examples/` with `?raw` into Starlight's `<Code>`; a user-visible
+change updates the page that describes it, not the README.
 
 ## Commands
 
@@ -11,11 +14,15 @@ make setup   # once: the switch hypha-postgres-eio, all dependencies
 make test    # starts the test Postgres in Podman, runs every test
 make lint    # formatting, odoc, and the release build
 make fmt     # format in place
+make docs    # the documentation site into _build/docs, as Pages publishes it
+make docs-serve  # the built site, served on DOCS_PORT, search included
 ```
 
 `make test` needs `podman compose`. Without
 `POSTGRES_EIO_TEST_PG` the cases that need a server are skipped, and the test
-output says so. CI runs `make lint` and `make test` on OCaml 5.5.
+output says so. `make docs` needs Bun. CI runs `make lint` and `make test`
+on OCaml 5.5, and `docs.yml` publishes the site to GitHub Pages on every
+push to `main`.
 
 ## Layout
 
@@ -33,8 +40,20 @@ src/                 the library; every module has an .mli
   pool               a fixed-size pool
 test/
   test_postgres_eio  protocol cases, fake servers, and a real Postgres
+  test_docs          every example on a page of the site
   postgres/          the test server's image: certificates and pg_hba.conf
+docs/                the documentation site, a Starlight site in Hypha's look,
+                     from starlight-theme-hypha: its pages in
+                     src/content/docs/, each importing the examples it shows
+                     as @examples/<file>.ml?raw into Starlight's <Code>
+examples/            the programs and modules the site shows, each a whole
+                     file, each built
 ```
+
+`make docs` builds the site into `_build/docs`, so it adds nothing to the
+root or to `.gitignore`, and `dune clean` removes it; odoc's reference is
+copied into `docs/public/reference/` first, since Starlight serves
+`public/` as it is and cannot read an `.mli`.
 
 Each module's contract is its `.mli`. Read the `.mli` before changing a
 module.

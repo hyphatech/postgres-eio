@@ -1,0 +1,20 @@
+; Small programs and modules, each showing one thing an application does
+; with the driver, for the documentation site: a page imports each file it
+; shows whole, with ?raw, into Starlight's <Code>. They are built with the
+; repository, so an example that stops compiling as the driver changes is
+; found by the build and not by a reader. The programs need a Postgres to
+; run; every other module is a piece of one, which a page shows alone.
+
+(executables
+ (names quick_start signing_in several_hosts pool listen)
+ (libraries postgres-eio eio eio_main mtime ptime))
+
+; @all builds only the modules a program links, and most pieces are linked
+; by none, so @all asks for this directory's @check, which compiles every
+; module.
+
+(rule
+ (alias all)
+ (deps
+  (alias check))
+ (action (progn)))

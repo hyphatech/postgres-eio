@@ -1,0 +1,55 @@
+---
+title: Quick start
+---
+
+import { Code } from "@astrojs/starlight/components";
+import quickStart from "@examples/quick_start.ml?raw";
+import addOrder from "@examples/add_order.ml?raw";
+
+A program that connects, runs one query with a parameter and prints what
+it finds. Put it in `bin/main.ml`:
+
+<Code code={quickStart} lang="ocaml" />
+
+and name its libraries in `bin/dune`:
+
+```lisp
+(executable
+ (name main)
+ (libraries postgres-eio eio_main))
+```
+
+Run it with `dune exec ./bin/main.exe`. It connects as `app` to the
+database `shop` on this machine; the
+[connection strings](/postgres-eio/guide/connection-strings/) guide says how
+to name another.
+
+## What it does
+
+`Conninfo.of_string` reads the connection string, and `connect` opens the
+connection on the switch `sw`, with the network and the clock Eio hands the
+program. The connection is closed when the switch ends, or earlier by
+`close`.
+
+Parameters are `$1`, `$2`, ... with `None` for NULL. Rows are folded as they
+arrive and never buffered: `row` is called once for each, with the result
+so far, and its last answer is the query's, beside the statement's tag.
+
+Every failure is a value, so `connect` and `query` answer a `result`, and
+`error_to_string` prints any of them. The [errors](/postgres-eio/guide/errors/)
+guide says what each failure means and what to do about it.
+
+## A statement for its effect
+
+A statement run for its effect needs no fold, and answers its tag:
+
+<Code code={addOrder} lang="ocaml" />
+
+## Next
+
+- [Queries and values](/postgres-eio/guide/queries/): parameters and cells
+  of every type, text and binary.
+- [Pool](/postgres-eio/guide/pool/): connections shared by a server's
+  fibers.
+- [TLS and signing in](/postgres-eio/guide/tls/): a connection for
+  production.

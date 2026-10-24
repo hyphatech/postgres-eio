@@ -22,3 +22,14 @@
   (glob_files postgres/*.crt)
   postgres/client.key
   postgres/client-encrypted.key))
+
+; Every example the build makes is on a page of the documentation site.
+
+(test
+ (name test_docs)
+ (modules test_docs)
+ (libraries alcotest)
+ (deps
+  ../examples/dune
+  (glob_files ../examples/*.ml)
+  (glob_files_rec ../docs/src/content/*.{md,mdx})))

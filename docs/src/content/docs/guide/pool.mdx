@@ -1,0 +1,91 @@
+---
+title: Pool
+---
+
+import { Code } from "@astrojs/starlight/components";
+import pool from "@examples/pool.ml?raw";
+import countOrders from "@examples/count_orders.ml?raw";
+import transfer from "@examples/transfer.ml?raw";
+import poolHealth from "@examples/pool_health.ml?raw";
+
+A pool keeps a fixed number of connections and lends one to each borrower
+in turn. All connections open at startup, so a bad configuration fails at
+once. A returned connection is reset (open transaction, settings, temporary
+tables, locks, `LISTEN`), and the reset costs the next borrower no round
+trip. One pool serves borrowers on every domain, and bounds a reconnect's
+name lookup by `connect_timeout` on each of them.
+
+## Making one
+
+<Code code={pool} lang="ocaml" />
+
+`Pool.create` opens every connection as `connect` does, or answers the first
+error after closing those already open. It takes `connect`'s options, and
+these of its own:
+
+| Option | Default | |
+|---|---|---|
+| `~size` | 8 | connections, all opened at startup, and at least one |
+| `~wait` | 5 s | how long a borrow waits for a connection to come free |
+| `~reset` | `true` | whether a returned connection loses its session state |
+| `~max_lifetime` | 30 min, ±10% | a connection older is replaced |
+| `~idle_check` | 60 s | a connection idle longer is pinged |
+
+## Borrowing
+
+<Code code={countOrders} lang="ocaml" />
+
+`Pool.use` returns `` `Pool `Busy `` if no connection frees up within
+its `wait` (5 s, or `~wait:Mtime.Span.(500 * ms)`), and `` `Pool `Closed `` at once after `Pool.close`;
+`Pool.error_to_string` prints either, and a connection's errors
+too, so `Result.join (Pool.use pool f)` is printed by one function. Cancelling a borrower stops it at
+once, wherever it waits: its statement is cancelled at the server, so the
+transaction rolls back, and its connection is closed and made again at the
+next lend.
+
+`f` runs on the calling fiber, and the connection goes back even if `f`
+raises. Pipelined answers left unread are read when the borrow ends.
+A wait over 100 ms and a borrow held over 250 ms log a `warn` on the
+`postgres-eio.pool` log source.
+
+## A transaction
+
+A transaction is `begin` and `commit` on one borrowed connection:
+
+<Code code={transfer} lang="ocaml" />
+
+## A clean connection
+
+Every lend is clean: no open transaction, no `LISTEN`, the connection's
+original timeout, and none of a previous borrower's session state. The
+reset sent at give-back is `DISCARD ALL` but for prepared statements and
+plans, which every borrower shares through the statement cache:
+`set session authorization default`, `select pg_advisory_unlock_all()`,
+`close all`, `unlisten *`, `reset all`, `discard temp` and
+`discard sequences`. It is sent and not waited for; the next lend reads
+its answer, usually already arrived, and makes the connection again if the
+session died meanwhile.
+
+`~reset:false` keeps session state between borrowers, except that an open
+transaction is still rolled back and `LISTEN` still ended: a pooled
+connection never listens. A [listener](/postgres-eio/guide/listen-notify/)
+is a connection of its own.
+
+## Housekeeping
+
+A fiber on the pool's switch checks idle connections a few times per the
+shorter of `idle_check` and `max_lifetime`. A connection past
+`max_lifetime` is replaced, the new one connected before the old one is
+removed. A connection idle past `idle_check` is pinged with an empty query,
+while another is idle, and replaced if the ping fails. A borrowed
+connection is never touched.
+
+<Code code={poolHealth} lang="ocaml" />
+
+`Pool.stats` answers the pool's `size`, how many of its connections are
+`idle`, how many borrows are `waiting`, and how many connections
+housekeeping has `replaced`, for a health check.
+
+`Pool.close` closes idle connections at once and borrowed ones when they
+come back, never under a running transaction. A borrow waiting, and every
+one after, answers `` `Pool `Closed ``.

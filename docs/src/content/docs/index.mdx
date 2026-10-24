@@ -1,0 +1,56 @@
+---
+title: postgres-eio
+description: A native Postgres driver for OCaml 5 and Eio.
+template: splash
+---
+
+import Landing from "starlight-theme-hypha/components/Landing.astro";
+import Features from "starlight-theme-hypha/components/Features.astro";
+import Feature from "starlight-theme-hypha/components/Feature.astro";
+import { Code } from "@astrojs/starlight/components";
+import quickStart from "@examples/quick_start.ml?raw";
+
+<Landing
+  title="A native Postgres driver for OCaml 5 and Eio."
+  tagline="Written for Eio in OCaml, the protocol spoken without libpq."
+  actions={[
+    { text: "Get started", link: "/postgres-eio/install/", icon: "right-arrow" },
+    { text: "Reference", link: "/postgres-eio/reference/", variant: "secondary" },
+  ]}
+>
+
+```sh
+opam repo add hypha https://github.com/hyphatech/opam-repository.git
+opam install postgres-eio
+```
+
+<Fragment slot="aside">
+
+<Code code={quickStart} lang="ocaml" />
+
+</Fragment>
+</Landing>
+
+<Features>
+  <Feature title="Secure by default" icon="shield-check" href="/postgres-eio/guide/tls/" linkText="TLS and signing in">
+    TLS, SCRAM-SHA-256 with channel binding and client certificates; a
+    connection that crosses a network is encrypted unless its string says
+    otherwise.
+  </Feature>
+  <Feature title="Pool and failover" icon="layers" href="/postgres-eio/guide/several-hosts/" linkText="Several hosts">
+    One pool serves every domain, across several hosts, with failover and load
+    balancing.
+  </Feature>
+  <Feature title="One round trip" icon="zap" href="/postgres-eio/guide/pipelining/" linkText="Pipelining and batches">
+    Statement caching, pipelining and batches.
+  </Feature>
+  <Feature title="Streams" icon="waves-horizontal" href="/postgres-eio/guide/copy/" linkText="COPY">
+    COPY in and out, and rows folded as they arrive, never buffered.
+  </Feature>
+  <Feature title="LISTEN/NOTIFY" icon="rss" href="/postgres-eio/guide/listen-notify/" linkText="LISTEN/NOTIFY">
+    A listener that reconnects by itself and says so.
+  </Feature>
+  <Feature title="Failures you can act on" icon="list-checks" href="/postgres-eio/guide/errors/" linkText="Errors">
+    Each says whether the statement may have run, so a retry is never blind.
+  </Feature>
+</Features>

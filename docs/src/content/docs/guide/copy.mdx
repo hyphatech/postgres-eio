@@ -1,0 +1,54 @@
+---
+title: COPY
+---
+
+import { Code } from "@astrojs/starlight/components";
+import loadOrders from "@examples/load_orders.ml?raw";
+import sumTotals from "@examples/sum_totals.ml?raw";
+import importCsv from "@examples/import_csv.ml?raw";
+import exportCsv from "@examples/export_csv.ml?raw";
+
+COPY moves bulk data in both directions, streamed, without holding a whole
+table. It takes no parameters.
+
+## Rows in
+
+<Code code={loadOrders} lang="ocaml" />
+
+`copy_in_rows` runs `COPY "schema"."table" ("a", "b") FROM STDIN` in text
+format, escaping each row. Cells follow `columns`' order, `None` for NULL;
+empty `columns` means every column, in the table's order. The sequence is
+read lazily. Names are quoted as given, so `"Jobs"` is not `jobs`.
+
+If the producer raises, the COPY is aborted, nothing is written and the
+connection stays usable; the exception propagates, and the server is sent
+a fixed message, never the exception. A NUL in a name is refused before
+anything is sent; a NUL in a value fails the COPY, the connection still
+usable.
+
+## Rows out
+
+`copy_out_rows` streams a select the other way:
+
+<Code code={sumTotals} lang="ocaml" />
+
+It runs `COPY (select) TO STDOUT` and decodes each row for `row`, `None`
+for NULL, like `query`, for a very large result.
+
+## Bytes in and out
+
+`copy_in` and `copy_out` run a COPY statement of your own, in its own
+format, CSV say, and move its bytes unchanged:
+
+<Code code={importCsv} lang="ocaml" />
+
+<Code code={exportCsv} lang="ocaml" />
+
+`copy_in` streams an Eio source, and `copy_out` folds each chunk into
+`chunk` as it arrives. Any other statement is refused, after it has run.
+If `chunk` raises, the connection is closed, the statement cancelled at
+the server, and the exception propagates. A cancellation of `copy_in`
+closes the connection.
+
+A COPY given to `query` or `script` is refused, and the connection stays
+usable.
