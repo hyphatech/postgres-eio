@@ -13,7 +13,7 @@ help: ## list targets
 	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-10s %s\n", $$1, $$2}'
 
 setup: ## create the switch and install dependencies
-	@docker compose version >/dev/null 2>&1 || echo "The tests need docker compose."
+	@podman compose version >/dev/null 2>&1 || echo "The tests need podman compose."
 	@opam switch list --short | grep -qx $(SWITCH) || opam switch create $(SWITCH) --empty -y
 	opam install . --switch=$(SWITCH) --deps-only --with-test --with-dev-setup -y
 
@@ -35,7 +35,7 @@ doc: ## build the API docs into _build/default/_doc/_html
 	$(OPAM) dune build @doc
 
 db: ## start the test database
-	docker compose up -d --build --wait db
+	podman compose up -d --build --wait db
 
 db-down: ## stop and delete the test database
-	docker compose rm -sf db
+	podman compose rm -sf db

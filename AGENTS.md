@@ -8,12 +8,12 @@ Users start at [README.md](README.md).
 
 ```sh
 make setup   # once: the switch hypha-postgres-eio, all dependencies
-make test    # starts the test Postgres in Docker, runs every test
+make test    # starts the test Postgres in Podman, runs every test
 make lint    # formatting, odoc, and the release build
 make fmt     # format in place
 ```
 
-`make test` needs `docker compose`. Without
+`make test` needs `podman compose`. Without
 `POSTGRES_EIO_TEST_PG` the cases that need a server are skipped, and the test
 output says so. CI runs `make lint` and `make test` on OCaml 5.5.
 
