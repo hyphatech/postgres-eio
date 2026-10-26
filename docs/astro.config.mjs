@@ -23,7 +23,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "postgres-eio",
-      description: "A native Postgres driver for OCaml 5 and Eio.",
+      description: "The Postgres driver for modern OCaml.",
       logo: { src: "starlight-theme-hypha/assets/hypha.webp" },
       favicon: "/favicon-32.png",
       head: [

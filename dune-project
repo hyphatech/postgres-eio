@@ -18,7 +18,7 @@
 
 (package
  (name postgres-eio)
- (synopsis "A native Postgres driver for OCaml 5 and Eio")
+ (synopsis "The Postgres driver for modern OCaml")
  (description
   "Protocol 3.0 and 3.2 over TCP, a Unix socket or TLS; SCRAM with channel binding, MD5 and client certificates; statements cached and pipelined, COPY both ways, LISTEN/NOTIFY, binary results and a pool, every failure a value.")
  (depends
