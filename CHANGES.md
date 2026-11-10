@@ -1,5 +1,11 @@
 # Changes
 
+## 0.5.2 (2026-11-10)
+
+- postgres-eio is published to open-opam, `opam repo add open-opam
+  https://github.com/open-opam/opam-repository.git`, and no longer to Hypha's
+  opam repository.
+
 ## 0.5.1 (2026-10-19)
 
 - A message is decoded where it was read, not copied out first: a row

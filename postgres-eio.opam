@@ -53,3 +53,4 @@ build: [
 ]
 dev-repo: "git+https://github.com/hyphatech/postgres-eio.git"
 x-maintenance-intent: ["(latest)"]
+x-open-opam: true
