@@ -46,9 +46,9 @@ format, CSV say, and move its bytes unchanged:
 
 `copy_in` streams an Eio source, and `copy_out` folds each chunk into
 `chunk` as it arrives. Any other statement is refused, after it has run.
-If `chunk` raises, the connection is closed, the statement cancelled at
-the server, and the exception propagates. A cancellation of `copy_in`
-closes the connection.
+If `chunk` raises, the statement is cancelled at the server, the
+connection closed, and the exception propagates. A cancellation of
+`copy_in` closes the connection.
 
 A COPY given to `query` or `script` is refused, and the connection stays
 usable.

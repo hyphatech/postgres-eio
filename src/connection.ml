@@ -1217,9 +1217,13 @@ let cancel_given_up t =
    end for nobody, so it is cancelled there as the connection closes,
    shielded, since a cancelled caller is one it is sent for. *)
 let stop t e =
-  break t e;
-  Eio.Cancel.protect (fun () ->
-      ignore (cancel_given_up t : (unit, error) result))
+  (* Cancel before closing: a pooling proxy can drop a cancel request for a
+     client session that has already disconnected. *)
+  Fun.protect
+    ~finally:(fun () -> break t e)
+    (fun () ->
+      Eio.Cancel.protect (fun () ->
+          ignore (cancel_given_up t : (unit, error) result)))
 
 (* Closing, or an exception from the caller's callback, leaves what was
    sent with no answer anybody reads. *)

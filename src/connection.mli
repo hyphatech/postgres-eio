@@ -138,8 +138,8 @@ val query :
 (** Runs one statement by the extended protocol. [params] bind [$1], [$2], ...
     as text, [None] for NULL. [columns] is called once before any row, even with
     no rows. [row] folds each row as it arrives ([None] is NULL); rows are not
-    buffered. If [row] raises, the connection is closed, the statement cancelled
-    at the server, and the exception propagates.
+    buffered. If [row] raises, the statement is cancelled at the server, the
+    connection closed, and the exception propagates.
 
     [binary] (false) requests binary for the types in {!Value.binary}, text for
     the rest; {!Value} decodes either. This needs column types before Bind,
