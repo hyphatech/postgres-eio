@@ -2987,6 +2987,30 @@ let a_cancel_request_left_unanswered_is_given_up () =
   Alcotest.(check bool) "closed" true (Pg.closed t);
   Alcotest.(check bool) "and returned before the server let go" false !let_go
 
+(* The cancel for a statement given up on reaches the server while the
+   session it names is still open: a pooling proxy can drop a cancel that
+   arrives after the client has disconnected. The fake notes, as the
+   CancelRequest arrives, whether the session has already ended. *)
+let a_cancel_is_sent_before_the_connection_closes () =
+  with_eio @@ fun env sw ->
+  let clock = Eio.Stdenv.mono_clock env in
+  let ended = ref false and cancelled_while_open = ref None in
+  let port, _ =
+    a_fake_postgres env sw
+      ~on_cancel:(fun () -> cancelled_while_open := Some (not !ended))
+      ~on_end:(fun ~terminated:_ -> ended := true)
+      ()
+  in
+  let t = connect env sw (fake port) in
+  Pg.set_timeout t ~timeout:None;
+  Eio.Fiber.first
+    (fun () -> ignore (Pg.execute t "select pg_sleep(60)" ~params:[]))
+    (fun () -> Eio.Time.Mono.sleep_span clock Mtime.Span.(200 * ms));
+  Alcotest.(check bool) "closed" true (Pg.closed t);
+  Alcotest.(check (option bool))
+    "the cancel came while the session was open" (Some true)
+    !cancelled_while_open
+
 (* target_session_attrs: read-write skips a standby; standby finds one. *)
 let the_kind_of_host_asked_for () =
   with_eio @@ fun env sw ->
@@ -4794,6 +4818,8 @@ let connection_cases =
       a_raising_row_function_is_cancelled_at_the_server;
     Alcotest.test_case "54.2.8 a cancel request left unanswered is given up"
       `Quick a_cancel_request_left_unanswered_is_given_up;
+    Alcotest.test_case "54.2.8 a cancel is sent before the connection closes"
+      `Quick a_cancel_is_sent_before_the_connection_closes;
     Alcotest.test_case "a reset keeps its parameters" `Quick
       a_reset_keeps_its_parameters;
     Alcotest.test_case "a silent server times out" `Quick

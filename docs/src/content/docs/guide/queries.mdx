@@ -22,7 +22,7 @@ and reads back what Postgres writes:
 <Code code={recentOrders} lang="ocaml" />
 
 Rows are folded as they arrive and never buffered. If `row` raises, the
-connection is closed, the statement cancelled at the server, and the
+statement is cancelled at the server, the connection closed, and the
 exception propagates.
 
 `columns`, when given, is called once before any row, even with no rows,
