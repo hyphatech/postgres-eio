@@ -1,5 +1,10 @@
 # Changes
 
+## Unreleased
+
+- postgres-eio installs its documentation for agents: each page of the
+  site as Markdown, and `llms.txt`, in `$(opam var postgres-eio:doc)`.
+
 ## 0.5.2 (2026-11-10)
 
 - postgres-eio is published to open-opam, `opam repo add open-opam

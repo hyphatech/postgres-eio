@@ -58,6 +58,18 @@ let () =
           Postgres_eio.close conn)
 ```
 
+## With an agent
+
+postgres-eio installs its documentation at `$(opam var postgres-eio:doc)`:
+each page of the site as Markdown, and `llms.txt`, which lists them. Your
+agent reads it when told to, in a line in your project's `AGENTS.md`:
+
+```md
+Before writing code with postgres-eio, read `$(opam var postgres-eio:doc)/llms.txt` and
+the pages it lists for the parts you need, and use those parts rather than
+writing your own.
+```
+
 ## Contributing
 
 See [AGENTS.md](AGENTS.md).
